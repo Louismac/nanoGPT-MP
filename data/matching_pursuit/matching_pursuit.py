@@ -3,20 +3,21 @@ from sklearn.linear_model import OrthogonalMatchingPursuit
 import numpy as np
 from os.path import exists
 from scipy.signal import get_window
+import torch
+import sys
 
 def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,
-                       window_type='hann', iterations = 100):
+                       window_type='hann', iterations = 100, name=""):
 
-    cached_path = "cached_chunks_" + str(chunk_size) + "_" + str(len(dictionary[0])) + "_" + str(iterations) +".npy"
-    reconstructed_signal = np.zeros(len(signal))
+    cached_path = name + "_cached_chunks_" + str(chunk_size) + "_" + str(len(dictionary[0])) + "_" + str(iterations) +".npy"
     if exists(cached_path):
         chunks_info = np.load(cached_path)
-        print("loaded from cache")
-        return reconstructed_signal, np.array(chunks_info)
+        chunks_info = torch.tensor(chunks_info).float()
+        print("loaded from cache", chunks_info.shape)
+        return chunks_info
 
-    window = get_window(window_type, chunk_size)
+    window = torch.tensor(get_window(window_type, chunk_size)).float()
     
-    weight_sum = np.zeros(len(signal))
     chunks_info = []
     stop = len(signal) - chunk_size + 1
     print(0, stop, hop_length)
@@ -24,50 +25,33 @@ def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,
         end = start + chunk_size
         chunk = signal[start:end]
         windowed_chunk = chunk * window
-        processed_chunk, atom_indices, coefficients = matching_pursuit(windowed_chunk, dictionary, iterations) 
+        _, atom_indices, coefficients = matching_pursuit(windowed_chunk, dictionary, iterations) 
         chunk_info = atom_indices + coefficients
         chunks_info.append(chunk_info)
-        print("chunk complete", start, end, len(chunk_info), len(chunks_info))
-        reconstructed_signal[start:end] += processed_chunk
-        weight_sum[start:end] += window  
-    # non_zero_weights = weight_sum > 0
-    # reconstructed_signal[non_zero_weights] /= weight_sum[non_zero_weights]
+        sys.stdout.write("\r{} out of {}...".format(start, stop))
+        sys.stdout.flush()
     np.save(cached_path, chunks_info)
-    return reconstructed_signal, np.array(chunks_info)
+    return torch.tensor(chunks_info)
 
 def matching_pursuit(signal, dictionary, iterations=20):
 
-    residual = signal.copy() 
-    reconstruction = np.zeros_like(signal)
+    residual = signal.clone().float()
+    reconstruction = torch.zeros_like(signal)
     atom_indices = []
     coefficients = []
 
     for _ in range(iterations):
-        correlations = np.dot(dictionary.T, residual)  
-        best_atom_index = np.argmax(np.abs(correlations))  
+        correlations = torch.matmul(dictionary.T, residual.view(-1, 1))  
+        best_atom_index = torch.argmax(np.abs(correlations))  
         best_coefficient = correlations[best_atom_index] 
         if not np.isinf(best_coefficient):
             reconstruction += best_coefficient * dictionary[:, best_atom_index] 
             residual = residual - (best_coefficient * dictionary[:, best_atom_index])  
-            atom_indices.append(best_atom_index)
-            coefficients.append(best_coefficient)
+            atom_indices.append(best_atom_index.item())
+            coefficients.append(best_coefficient.item())
         else:
             break
-    print(len(atom_indices))
-    return reconstruction, atom_indices, coefficients
-
-    # Instantiate the OMP model
-    # omp = OrthogonalMatchingPursuit(n_nonzero_coefs=iterations)  # Adjust n_nonzero_coefs as needed
-
-    # # Reshape signal for compatibility with OMP (OMP expects 2D input)
-    # signal_reshaped = signal.reshape(-1, 1)
-    # # Fit the model
-    # omp.fit(dictionary, signal_reshaped)
-    # # Get the coefficients (sparse representation)
-    # coefficients = omp.coef_
-    # reconstructed_signal = np.dot(dictionary, coefficients).flatten()
-    # atom_indices = np.nonzero(coefficients)[0]
-    # return reconstructed_signal, atom_indices, coefficients
+    return reconstruction.detach().numpy(), atom_indices, coefficients
 
 def get_unnormalised_atoms(chunk_info, num_atoms, dictionary_size, cmax, cmin):
     atom_indices = chunk_info[:num_atoms].detach().numpy()
@@ -102,21 +86,21 @@ def reconstruct_from_normalised_chunks(chunks_info, dictionary, chunk_size=2048,
                                    get_unnormalised_atoms, num_atoms, dictionary_size, cmax, cmin)
 
 def reconstruct_signal(atom_indices, coefficients, dictionary):
-    reconstructed_signal = np.zeros(dictionary.shape[0])
-    atom_indices = np.array(atom_indices, dtype=np.int32)
+    reconstructed_signal = torch.zeros(dictionary.shape[0])
     for index, coeff in zip(atom_indices, coefficients):
-        reconstructed_signal += coeff * dictionary[:, index]
+        reconstructed_signal += coeff * dictionary[:, int(index)]
     return reconstructed_signal
 
 def reconstruct_from_chunks(chunks_info, dictionary, chunk_size=2048, hop_length=1024, unpack_func=lambda x: x, *args):
+    
     signal_length = (len(chunks_info) * (hop_length))+chunk_size
-    reconstructed_signal = np.zeros(signal_length)
-    weight_sum = np.zeros(signal_length)  
+    reconstructed_signal = torch.zeros(signal_length)
+    weight_sum = torch.zeros(signal_length)  
     
     start = 0
     end = chunk_size
     
-    for i, chunk_info in enumerate(chunks_info):
+    for chunk_info in chunks_info:
         
         atom_indices, coefficients = unpack_func(chunk_info, *args)
         chunk_reconstruction = reconstruct_signal(atom_indices, coefficients, dictionary) 
@@ -151,6 +135,12 @@ def get_dictionary(chunk_size=2048, dictionary_size=10000,
                    sigmas=[0.05, 0.1, 0.2, 0.5, 0.7, 1.0, 1.5]):
     freqs = np.logspace(np.log10(min_freq), np.log10(max_freq), dictionary_size // len(sigmas))
     dictionary = create_gabor_dictionary(chunk_size, freqs, sigmas, sr)
+    gen_size = dictionary.shape[1]
+    pad_size = dictionary_size-gen_size
+    padding = np.random.random((chunk_size,pad_size))
+    print("padding", padding.shape)
+    dictionary = np.hstack((dictionary, padding))
     dictionary = dictionary.astype(np.float64)
     dictionary /= np.linalg.norm(dictionary, axis=0)
-    return dictionary
+    print("dictionary", dictionary.shape)
+    return torch.tensor(dictionary).float()

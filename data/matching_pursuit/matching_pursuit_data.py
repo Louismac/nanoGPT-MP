@@ -21,40 +21,26 @@ def read_audio(path, sr=44100):
             if not ".DS" in file:
                 audio, sr, = librosa.load(path + file, sr = sr)
                 x = np.concatenate((x, audio))
-    x = np.array(x, dtype=np.float32)
-    return x
-
-def get_sequences(chunks_info, sequence_length):
-    #chunks info is num_frames x (num_atoms * 2)
-    start = 0
-    end = len(chunks_info) - sequence_length - 1 
-    step = 1
-    x_frames = []
-    y_frames = []
-
-    #Split into sequences
-    for i in range(start, end, step):
-        x = chunks_info[i:i + sequence_length]
-        y = chunks_info[i + sequence_length]
-        x_frames.append(torch.tensor(x))
-        y_frames.append(torch.tensor(y))
-
-    #Swap so items x features x sequence
-    x_frames = torch.stack(x_frames).transpose(1,2)
-    y_frames = torch.stack(y_frames)
-
-    return x_frames, y_frames
+    return torch.tensor(x).float()
 
 def preprocess_data_embedding(path, chunk_size=2048, hop_length=1024, sr=44100, 
-                       num_atoms=100, dictionary=None):
+                       num_atoms=100, dictionary=None, name=""):
     x = read_audio(path, sr)
     #Get chunks (this takes time!)
-    _,chunks_info = process_in_chunks(x, 
-                                    dictionary, 
-                                    hop_length=hop_length,
-                                    chunk_size=chunk_size, 
-                                    iterations=num_atoms)
-    return chunks_info
+    data = process_in_chunks(x, 
+                            dictionary, 
+                            hop_length=hop_length,
+                            chunk_size=chunk_size, 
+                            iterations=num_atoms, name = name)
+    print("data", data.shape)
+    indices = data[:,:num_atoms].long()
+    coeff = data[:,num_atoms:]
+    d_size = len(dictionary.T)
+    one_hot_encoded = torch.nn.functional.one_hot(indices, d_size)
+    one_hot_encoded = one_hot_encoded.sum(dim=1)
+    sparse = torch.cat([one_hot_encoded.float(), coeff], dim=-1)
+    print("coeff",coeff)
+    return data, sparse
 
 class MatchingPursuitDataset(Dataset):
     def __init__(self, x_frames, y_frames):
@@ -78,10 +64,11 @@ class MultiClassCoeffiecentLoss(nn.Module):
     def forward(self, predicted_indices, predicted_coefficients, targets):
         true_indices = targets[:,:self.num_categories]
         true_coefficients = targets[:,self.num_categories:]
-        #compares probs against binary (num_categories vs num_categories)
+         #compares probs against binary (num_categories vs num_categories)
         indices_loss = self.softmax_loss(predicted_indices, true_indices)
         coefficients_loss = self.mse_loss(predicted_coefficients, true_coefficients)
         total_loss = indices_loss + coefficients_loss
+        # print("total_loss",total_loss)
         return total_loss
 
 class RNNEmbeddingModel(nn.Module):

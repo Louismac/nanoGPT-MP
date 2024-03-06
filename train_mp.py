@@ -132,13 +132,18 @@ def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.int32, mode='r')
+        data = np.memmap(os.path.join(data_dir, 'train_x.bin'), dtype=np.float32, mode='r')
+        sparse = np.memmap(os.path.join(data_dir, 'train_y.bin'), dtype=np.float32, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.int32, mode='r')
-    data = data.reshape(len(data)//(config["num_atoms"]*2), config["num_atoms"]*2)
+        data = np.memmap(os.path.join(data_dir, 'val_x.bin'), dtype=np.float32, mode='r')
+        sparse = np.memmap(os.path.join(data_dir, 'val_y.bin'), dtype=np.float32, mode='r')
+    num_features = (config["num_atoms"]*2)
+    data = data.reshape(len(data)//num_features, num_features)
+    num_features = config["dictionary_size"] + config["num_atoms"]
+    sparse = sparse.reshape(len(sparse)//num_features, num_features)
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
+    y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -147,7 +152,7 @@ def get_batch(split):
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
-iter_num = 0
+iter_num = 1
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
@@ -235,6 +240,7 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        print("estimate_loss", eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
@@ -269,6 +275,7 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
+print("start training")
 while True:
 
     # determine and set the learning rate for this iteration

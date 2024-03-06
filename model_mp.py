@@ -79,7 +79,7 @@ class CausalSelfAttention(nn.Module):
         return y
 
 class MLP(nn.Module):
-
+    #Why 4?
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd_output, 4 * config.n_embd_output, bias=config.bias)
@@ -141,7 +141,7 @@ class GPT(nn.Module):
         print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd_output)
         self.transformer = Transformer(config)
         print("done transformer")
-        self.lm_head = nn.Linear(config.n_embd_output, (config.vocab_size * config.num_atoms) + config.num_atoms, bias=False)
+        self.lm_head = nn.Linear(config.n_embd_output, config.vocab_size + config.num_atoms, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -184,7 +184,7 @@ class GPT(nn.Module):
 
     def forward(self, inputs, targets=None):
         #inputs = batch x block_size x features (num_atoms*2)
-        idx = inputs[:,:,:self.config.num_atoms]
+        idx = inputs[:,:,:self.config.num_atoms].long()
         coef = inputs[:,:,self.config.num_atoms:]
         device = idx.device 
         b, t, f = idx.size()
@@ -205,18 +205,21 @@ class GPT(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
-            split = (self.config.vocab_size*self.config.num_atoms)
+            split = self.config.vocab_size
             idx = logits[:,:,:split]
             coef = logits[:,:,split:]
-            idx_target = targets[:,:,:self.config.num_atoms]
-            coef_target = targets[:,:,self.config.num_atoms:]
-            #final column should be dictionary size (e.g. logits for 1 atom)
-            idx = idx.reshape(-1, self.config.vocab_size)
-            #flatten to 1 dimension of indexes (batch x block x num_atoms)
-            idx_target= idx_target.reshape(-1)
-            cf_loss = F.cross_entropy(idx, idx_target)
+            # print("targets", targets.shape)
+            # #b x block x dictionary
+            # print("idx", idx.shape, idx.dtype)
+            # print("coef", coef.shape)
+            idx_target = targets[:,:,:self.config.vocab_size]
+            coef_target = targets[:,:,self.config.vocab_size:]
+            # print("idx_target", idx_target.shape, idx_target.dtype)
+            # print("coef_target", coef_target.shape)
+            bce_loss_func = nn.BCEWithLogitsLoss()
+            bce_loss = bce_loss_func(idx, idx_target)
             mse_loss = F.mse_loss(coef, coef_target)
-            loss = cf_loss+mse_loss
+            loss = bce_loss+mse_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
