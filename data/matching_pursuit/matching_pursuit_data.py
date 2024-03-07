@@ -9,6 +9,8 @@ from os import listdir
 from matching_pursuit import process_in_chunks
 np.set_printoptions(suppress=True)
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 def read_audio(path, sr=44100):
     #search folder
     x = [0]
@@ -21,7 +23,8 @@ def read_audio(path, sr=44100):
             if not ".DS" in file:
                 audio, sr, = librosa.load(join(path, file), sr = sr)
                 x = np.concatenate((x, audio))
-    return torch.tensor(x).float()
+    print("loaded audio", len(x)/sr)
+    return torch.tensor(x, device=device).float()
 
 def preprocess_data_embedding(path, chunk_size=2048, hop_length=1024, sr=44100, 
                        num_atoms=100, dictionary=None, name=""):
