@@ -1,15 +1,22 @@
 import numpy as np
 from sklearn.linear_model import OrthogonalMatchingPursuit
 import numpy as np
-from os.path import exists
+from os.path import exists, join
+from os import mkdir
 from scipy.signal import get_window
 import torch
 import sys
 
+def get_run_name(name, chunk_size, dictionary_size, num_atoms):
+    dir = name + "_" + str(chunk_size) + "_" + str(dictionary_size) + "_" + str(num_atoms)
+    if not exists(dir):
+        mkdir(dir)
+    return dir
+
 def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,
                        window_type='hann', iterations = 100, name=""):
-
-    cached_path = name + "_cached_chunks_" + str(chunk_size) + "_" + str(len(dictionary[0])) + "_" + str(iterations) +".npy"
+    cached_path = get_run_name(name, chunk_size, len(dictionary[0]), iterations)
+    cached_path = join(cached_path,"cached_chunks.npy")
     if exists(cached_path):
         chunks_info = np.load(cached_path)
         chunks_info = torch.tensor(chunks_info).float()

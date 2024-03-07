@@ -1,4 +1,3 @@
-
 out_dir = 'out-mp'
 eval_interval = 250 # keep frequent because we'll overfit
 eval_iters = 200
@@ -12,12 +11,14 @@ wandb_project = 'mp'
 wandb_run_name = 'mini-gpt'
 
 #mp stuff 
-num_atoms = 20
+num_atoms = 100
 file_name = "../assets/Wiley_10.wav"
+name = "wiley"
 chunk_size = 2048
 hop_length = chunk_size//4
 sr = 44100
-dictionary_size = 5000
+dictionary_size = 10000
+
 
 dataset = 'matching_pursuit'
 gradient_accumulation_steps = 1
@@ -26,10 +27,8 @@ block_size = 256 # context of up to 256 previous characters
 
 # baby GPT model :)
 n_layer = 6
-n_head = 4
-n_embd = 30
-#(embedding_dim+1)*num_atoms (this is an embedding vector and 1 coefficient for each atom)
-n_embd_output = (n_embd+1)*num_atoms #(620)
+n_head = 6
+n_embd = 384
 dropout = 0.2
 
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher

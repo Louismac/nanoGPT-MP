@@ -5,7 +5,6 @@ from matching_pursuit_data import MultiClassCoeffiecentLoss, RNNEmbeddingModel
 from matching_pursuit_data import MatchingPursuitDataset
 from matching_pursuit import get_dictionary
 from datetime import datetime
-
 from matching_pursuit_data import MatchingPursuitDataset
 from matching_pursuit_data import preprocess_data_embedding, get_sequences
 from matching_pursuit import reconstruct_from_embedding_chunks, get_dictionary

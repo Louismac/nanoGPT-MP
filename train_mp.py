@@ -29,7 +29,7 @@ from torch.distributed import init_process_group, destroy_process_group
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 from model_mp import GPTConfig, GPT
-
+from torchsummary import summary
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -51,8 +51,6 @@ batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch si
 block_size = 1024
 # model
 n_layer = 12
-n_head = 12
-n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -71,16 +69,14 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 
 
-sequence_length = 40
-num_atoms = 100
-dictionary_size = 10000
+num_atoms = 20
 file_name = "../assets/Wiley_10.wav"
 chunk_size = 2048
 hop_length = chunk_size//4
 sr = 44100
-dictionary_size = 10000
-
-n_embd_output = (n_embd+1)*num_atoms
+dictionary_size = 5000
+name = "test"
+from data.matching_pursuit.matching_pursuit import get_run_name
 
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
@@ -91,6 +87,9 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
+cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
+cache_path = os.path.join("data", dataset, cache_path)
+
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -127,16 +126,15 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # poor man's data loader
-data_dir = os.path.join('data', dataset)
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(data_dir, 'train_x.bin'), dtype=np.float32, mode='r')
-        sparse = np.memmap(os.path.join(data_dir, 'train_y.bin'), dtype=np.float32, mode='r')
+        data = np.memmap(os.path.join(cache_path, 'train_x.bin'), dtype=np.float32, mode='r')
+        sparse = np.memmap(os.path.join(cache_path, 'train_y.bin'), dtype=np.float32, mode='r')
     else:
-        data = np.memmap(os.path.join(data_dir, 'val_x.bin'), dtype=np.float32, mode='r')
-        sparse = np.memmap(os.path.join(data_dir, 'val_y.bin'), dtype=np.float32, mode='r')
+        data = np.memmap(os.path.join(cache_path, 'val_x.bin'), dtype=np.float32, mode='r')
+        sparse = np.memmap(os.path.join(cache_path, 'val_y.bin'), dtype=np.float32, mode='r')
     num_features = (config["num_atoms"]*2)
     data = data.reshape(len(data)//num_features, num_features)
     num_features = config["dictionary_size"] + config["num_atoms"]
@@ -156,7 +154,7 @@ iter_num = 1
 best_val_loss = 1e9
 
 # attempt to derive vocab_size from the dataset
-meta_path = os.path.join(data_dir, 'meta.pkl')
+meta_path = os.path.join(cache_path, 'meta.pkl')
 meta_vocab_size = None
 if os.path.exists(meta_path):
     with open(meta_path, 'rb') as f:
@@ -167,7 +165,7 @@ if os.path.exists(meta_path):
 # model init
 meta_vocab_size = dictionary_size
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size, num_atoms = num_atoms,
-                  bias=bias, vocab_size=None, dropout=dropout, n_embd_output=n_embd_output) 
+                  bias=bias, vocab_size=None, dropout=dropout) 
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -190,6 +188,7 @@ elif init_from == 'resume':
     # create the model
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    
     state_dict = checkpoint['model']
     # fix the keys of the state dictionary :(
     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
@@ -213,7 +212,6 @@ if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
-
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -271,6 +269,8 @@ if wandb_log and master_process:
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
+print("summary", X.shape)
+summary(model, input_size=X.shape)
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
