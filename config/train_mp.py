@@ -12,10 +12,10 @@ wandb_run_name = 'mini-gpt'
 
 #mp stuff 
 num_atoms = 100
-file_name = "../assets/Wiley_10.wav"
-name = "wiley"
+file_name = "taylor_vocals"
+name = "taylor_vocals"
 chunk_size = 2048
-hop_length = chunk_size//4
+hop_length = chunk_size//2
 sr = 44100
 dictionary_size = 10000
 

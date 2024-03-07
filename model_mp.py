@@ -146,6 +146,7 @@ class GPT(nn.Module):
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         print("self.lm_head.weight", self.lm_head.weight.shape)
+        self.bce_loss_func = nn.BCEWithLogitsLoss()
 
         #I HAVE OCMMENTED OUT WEIGHT TYING LOUIS
 
@@ -191,6 +192,7 @@ class GPT(nn.Module):
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
         # forward the GPT model itself
         #this embeds the index in dictionary
+        idx = torch.clamp(idx, min=0, max=9999)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
         #weight emedding by coeff
         weighted_tok_emb = tok_emb *  coef.unsqueeze(-1)
@@ -198,8 +200,10 @@ class GPT(nn.Module):
         summed_emb = torch.sum(weighted_tok_emb, dim=2)
         b,t,e = summed_emb.shape
         #this embeds the position in the block
-        pos_emb = self.transformer.wpe(pos).squeeze(1) # position embeddings of shape (t, num_atoms, n_embd)
+        pos_emb = self.transformer.wpe(pos).squeeze(1) 
+        #Expand to match the batch dimension 
         pos_emb = pos_emb.squeeze(1).unsqueeze(0).expand(b, -1, -1)
+        #add together token and pos embedding
         embedding_combined = summed_emb + pos_emb
         x = self.transformer.drop(embedding_combined)
         for block in self.transformer.h:
@@ -212,23 +216,21 @@ class GPT(nn.Module):
             idx = logits[:,:,:split]
             coef = logits[:,:,split:]
             # print("targets", targets.shape)
-            # #b x block x dictionary
             # print("idx", idx.shape, idx.dtype)
             # print("coef", coef.shape)
             idx_target = targets[:,:,:self.config.vocab_size]
             coef_target = targets[:,:,self.config.vocab_size:]
             # print("idx_target", idx_target.shape, idx_target.dtype)
             # print("coef_target", coef_target.shape)
-            bce_loss_func = nn.BCEWithLogitsLoss()
-            bce_loss = bce_loss_func(idx, idx_target)
+            bce_loss = self.bce_loss_func(idx, idx_target)
             mse_loss = F.mse_loss(coef, coef_target)
             loss = bce_loss+mse_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x) # note: using list [-1] to preserve the time dim
             loss = None
 
-        return logits, loss.float()
+        return logits, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -340,28 +342,35 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, chunks, max_new_tokens, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        for _ in range(max_new_tokens):
+        for i in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            chunks_cond = chunks if chunks.size(1) <= self.config.block_size else chunks[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
+            output, _ = self(chunks_cond)
+            
+            split = self.config.vocab_size
+            #just the last in the sequence
+            logits = output[:,-1,:split]/ temperature
+            coef = output[:,-1,split:]
+
+            
+            #optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
             # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)
+            idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
+            chunk_next = torch.cat((idx_next, coef), axis=1)
+            chunk_next = chunk_next.reshape((chunks.shape[-1])).unsqueeze(0).unsqueeze(0)
             # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
+            chunks = torch.cat((chunks, chunk_next), dim=1)
 
-        return idx
+        return chunks

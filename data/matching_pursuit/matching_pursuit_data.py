@@ -39,10 +39,19 @@ def preprocess_data_embedding(path, chunk_size=2048, hop_length=1024, sr=44100,
     indices = data[:,:num_atoms].long()
     coeff = data[:,num_atoms:]
     d_size = len(dictionary.T)
-    one_hot_encoded = torch.nn.functional.one_hot(indices, d_size)
-    one_hot_encoded = one_hot_encoded.sum(dim=1)
-    sparse = torch.cat([one_hot_encoded.float(), coeff], dim=-1)
-    print("coeff",coeff)
+    print(indices.shape, d_size)
+    binary_repr = torch.zeros(indices.shape[0], d_size, dtype=torch.float32, device=device)
+    for i in range(indices.shape[1]):
+        # This ensures we only work within the actual length of each sequence in the batch
+        binary_repr.scatter_add_(1, indices[:, i:i+1], torch.ones_like(indices[:, i:i+1], dtype=torch.float32))
+    binary_repr.clamp_(max=1)
+    print(binary_repr.shape)
+    ctr = 0
+    for i, b in enumerate(binary_repr):
+        if b.sum().item() < 10:
+            ctr+=1
+    print(ctr)
+    sparse = torch.cat([binary_repr.float(), coeff], dim=-1)
     return data, sparse
 
 class MatchingPursuitDataset(Dataset):

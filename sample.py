@@ -6,21 +6,67 @@ import pickle
 from contextlib import nullcontext
 import torch
 import tiktoken
-from model import GPTConfig, GPT
+from model_mp import GPTConfig, GPT
+import numpy as np
+from data.matching_pursuit.matching_pursuit import get_run_name, get_dictionary
+from data.matching_pursuit.matching_pursuit import reconstruct_from_embedding_chunks
+from datetime import datetime
+import soundfile as sf
+
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
-out_dir = 'out' # ignored if init_from is not 'resume'
+out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
+
+num_atoms = 100
+file_name = "taylor_vocals"
+name = "taylor_vocals"
+chunk_size = 2048
+hop_length = chunk_size//2
+sr = 44100
+dictionary_size = 10000
+dataset = 'matching_pursuit'
+batch_size = 64
+block_size = 256 
+
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
+config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
+config = {k: globals()[k] for k in config_keys} # will be useful for logging
+print("config", config)
+cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
+cache_path = os.path.join("data", dataset, cache_path)
+# poor man's data loader
+def get_batch(split):
+    # We recreate np.memmap every batch to avoid a memory leak, as per
+    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    if split == 'train':
+        data = np.memmap(os.path.join(cache_path, 'train_x.bin'), dtype=np.float32, mode='r')
+        sparse = np.memmap(os.path.join(cache_path, 'train_y.bin'), dtype=np.float32, mode='r')
+    else:
+        data = np.memmap(os.path.join(cache_path, 'val_x.bin'), dtype=np.float32, mode='r')
+        sparse = np.memmap(os.path.join(cache_path, 'val_y.bin'), dtype=np.float32, mode='r')
+    num_features = (config["num_atoms"]*2)
+    data = data.reshape(len(data)//num_features, num_features)
+    num_features = config["dictionary_size"] + config["num_atoms"]
+    sparse = sparse.reshape(len(sparse)//num_features, num_features)
+    ix = torch.randint(len(data) - config["block_size"], (config["batch_size"],))
+    x = torch.stack([torch.from_numpy((data[i:i+config["block_size"]]).astype(np.float32)) for i in ix])
+    y = torch.stack([torch.from_numpy((sparse[i+1:i+1+config["block_size"]]).astype(np.float32)) for i in ix]) 
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
 # -----------------------------------------------------------------------------
 
 torch.manual_seed(seed)
@@ -36,6 +82,7 @@ if init_from == 'resume':
     # init from a model saved in a specific directory
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
+    print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
     model = GPT(gptconf)
     state_dict = checkpoint['model']
@@ -47,6 +94,8 @@ if init_from == 'resume':
 elif init_from.startswith('gpt2'):
     # init from a given GPT-2 model
     model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+
+print("model loaded")
 
 model.eval()
 model.to(device)
@@ -73,17 +122,22 @@ else:
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
 
-# encode the beginning of the prompt
-if start.startswith('FILE:'):
-    with open(start[5:], 'r', encoding='utf-8') as f:
-        start = f.read()
-start_ids = encode(start)
-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-
+x,y = get_batch("train")
+print("x[0]", x[0].shape)
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
-            print('---------------')
+            y = model.generate(x[0].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
+            print(y.shape)
+            dictionary = get_dictionary(chunk_size=config["chunk_size"], max_freq=10000, 
+                                        sr=config["sr"], dictionary_size=config["dictionary_size"])
+            audio = reconstruct_from_embedding_chunks(y.squeeze(0), 
+                                                      dictionary=dictionary, 
+                                                      chunk_size=config["chunk_size"], 
+                                                      hop_length=config["hop_length"]).cpu().numpy()
+            print(len(audio))
+            timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
+            # # WRITE AUDIO
+            name = config["name"]
+            sf.write(f"{name}_{timestampStr}.wav", audio, 44100)

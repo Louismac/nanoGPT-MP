@@ -21,22 +21,21 @@ def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,
     cached_path = join(cached_path,"cached_chunks.pt")
     if exists(cached_path):
         chunks_info = torch.load(cached_path)
-        chunks_info = torch.tensor(chunks_info, device=device).float()
+        chunks_info = chunks_info.to(device).float()
         print("loaded from cache", chunks_info.shape)
         return chunks_info
 
     window = torch.tensor(get_window(window_type, chunk_size), device=device).float()
     
     stop = len(signal) - chunk_size + 1
-    chunks_info = torch.zeros((stop//hop_length)+1, iterations*2, device=device)
-    print(0, stop, hop_length)
+    num_chunks = (stop//hop_length)+1
+    chunks_info = torch.zeros(num_chunks, iterations*2, device=device)
     for i, start in enumerate(range(0, stop, hop_length)):
         end = start + chunk_size
         chunk = signal[start:end]
         windowed_chunk = chunk * window
-        atom_indices, coefficients = matching_pursuit(windowed_chunk, dictionary, iterations) 
-        chunks_info[i] = torch.cat((atom_indices, coefficients))
-        sys.stdout.write("\r{} out of {} ({}\%)".format(start, stop, np.round(start/stop, 4)*100))
+        chunks_info[i] = matching_pursuit(windowed_chunk, dictionary, iterations) 
+        sys.stdout.write("\r{} frames out of {} ({:.2f}%)".format(start//chunk_size, stop//chunk_size, start/stop*100))
         sys.stdout.flush()
     torch.save(chunks_info, cached_path)
     return torch.tensor(chunks_info, device=device)
@@ -44,8 +43,7 @@ def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,
 def matching_pursuit(signal, dictionary, iterations=20):
 
     residual = signal.clone().float()
-    atom_indices = torch.zeros(iterations, device=device)
-    coefficients = torch.zeros(iterations, device=device)
+    output = torch.zeros(iterations*2, device=device)
 
     for i in range(iterations):
         correlations = torch.matmul(dictionary.T, residual.view(-1, 1))  
@@ -53,14 +51,13 @@ def matching_pursuit(signal, dictionary, iterations=20):
         best_coefficient = correlations[best_atom_index] 
         if not torch.isinf(best_coefficient):
             residual = residual - (best_coefficient * dictionary[:, best_atom_index])  
-            atom_indices[i] = best_atom_index
-            coefficients[i] = best_coefficient
+            output[i] = best_atom_index
+            output[i+iterations] = best_coefficient
         else:
             break
-    return atom_indices, coefficients
+    return output
 
 def get_embedding_atoms(chunk_info, num_atoms):
-    chunk_info = chunk_info.detach().numpy()
     return chunk_info[:num_atoms], chunk_info[num_atoms:]
 
 def reconstruct_from_embedding_chunks(chunks_info, dictionary, chunk_size=2048, hop_length=1024):
@@ -69,7 +66,7 @@ def reconstruct_from_embedding_chunks(chunks_info, dictionary, chunk_size=2048, 
                                    get_embedding_atoms,  num_atoms)
 
 def reconstruct_signal(atom_indices, coefficients, dictionary):
-    reconstructed_signal = torch.zeros(dictionary.shape[0])
+    reconstructed_signal = torch.zeros(dictionary.shape[0], device=device)
     for index, coeff in zip(atom_indices, coefficients):
         reconstructed_signal += coeff * dictionary[:, int(index)]
     return reconstructed_signal
@@ -77,20 +74,23 @@ def reconstruct_signal(atom_indices, coefficients, dictionary):
 def reconstruct_from_chunks(chunks_info, dictionary, chunk_size=2048, hop_length=1024, unpack_func=lambda x: x, *args):
     
     signal_length = (len(chunks_info) * (hop_length))+chunk_size
-    reconstructed_signal = torch.zeros(signal_length)
-    weight_sum = torch.zeros(signal_length)  
-    
+    reconstructed_signal = torch.zeros(signal_length, device=device)
+    weight_sum = torch.zeros(signal_length, device=device)  
+    dictionary_size = len(dictionary[0])
     start = 0
     end = chunk_size
     
     for chunk_info in chunks_info:
         
         atom_indices, coefficients = unpack_func(chunk_info, *args)
+        atom_indices = torch.clamp(atom_indices, min=0, max=dictionary_size-1)
         chunk_reconstruction = reconstruct_signal(atom_indices, coefficients, dictionary) 
         reconstructed_signal[start:end] += chunk_reconstruction
         weight_sum[start:end] += 1  
         start += hop_length
         end += hop_length
+        sys.stdout.write("\r{} frames out of {} ({:.2f}%)".format(start//chunk_size, signal_length//chunk_size, start/signal_length*100))
+        sys.stdout.flush()
 
     overlap_areas = weight_sum > 1  
     reconstructed_signal[overlap_areas] /= weight_sum[overlap_areas]

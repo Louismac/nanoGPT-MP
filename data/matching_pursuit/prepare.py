@@ -23,7 +23,7 @@ data, sparse = preprocess_data_embedding(file_name,
 
 # create the train and test splits
 print("data", data.shape)
-print("sparse", sparse.shape, sparse)
+print("sparse", sparse.shape)
 n = len(data)
 train_data = data[:int(n*0.9)].cpu().numpy()
 val_data = data[int(n*0.9):].cpu().numpy()
