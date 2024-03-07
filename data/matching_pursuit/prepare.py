@@ -5,8 +5,9 @@ import os
 
 num_atoms = 100
 dictionary_size = 10000
-file_name = "Wiley_10.wav"
-output_name = "wiley"
+#can be directory or file
+file_name = "taylor_vocals"
+output_name = "taylor_vocals"
 chunk_size = 2048
 hop_length = chunk_size//4
 sr = 44100
@@ -22,18 +23,16 @@ data, sparse = preprocess_data_embedding(file_name,
 print("data", data.shape)
 print("sparse", sparse.shape, sparse)
 n = len(data)
-train_data = np.vstack([data[:int(n*0.9)] for i in range(100)])
-val_data = np.vstack([data[int(n*0.9):] for i in range(100)])
-print("train_data x", train_data.shape, train_data)
+train_data = data[:int(n*0.9)]
+val_data = data[int(n*0.9):]
 train_data = np.array(train_data, dtype=np.float32)
 val_data = np.array(val_data, dtype=np.float32)
 train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_x.bin'))
 val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val_x.bin'))
 
-train_data = np.vstack([sparse[:int(n*0.9)] for i in range(100)])
-val_data = np.vstack([sparse[int(n*0.9):] for i in range(100)])
+train_data = sparse[:int(n*0.9)]
+val_data = sparse[int(n*0.9):]
 train_data = np.array(train_data, dtype=np.float32)
 val_data = np.array(val_data, dtype=np.float32)
 train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_y.bin'))
 val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val_y.bin'))
-print("train_data y", train_data.shape)

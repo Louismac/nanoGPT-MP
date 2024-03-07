@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import librosa
-from os.path import isdir
+from os.path import isdir, join
 from os import listdir
 from matching_pursuit import process_in_chunks
 np.set_printoptions(suppress=True)
@@ -19,7 +19,7 @@ def read_audio(path, sr=44100):
         x = np.array([0])
         for file in files:
             if not ".DS" in file:
-                audio, sr, = librosa.load(path + file, sr = sr)
+                audio, sr, = librosa.load(join(path, file), sr = sr)
                 x = np.concatenate((x, audio))
     return torch.tensor(x).float()
 
