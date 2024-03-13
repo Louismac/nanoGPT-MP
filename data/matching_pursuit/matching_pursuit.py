@@ -8,6 +8,7 @@ import torch
 import sys
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available()else "mps")
 
 def get_run_name(name, chunk_size, dictionary_size, num_atoms):
     dir = name + "_" + str(chunk_size) + "_" + str(dictionary_size) + "_" + str(num_atoms)
@@ -25,7 +26,7 @@ def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,
         print("loaded from cache", chunks_info.shape)
         return chunks_info
 
-    window = torch.tensor(get_window(window_type, chunk_size), device=device).float()
+    window = torch.tensor(get_window(window_type, chunk_size), device=device, dtype=torch.float32)
     
     stop = len(signal) - chunk_size + 1
     num_chunks = (stop//hop_length)+1
@@ -122,7 +123,7 @@ def get_dictionary(chunk_size=2048, dictionary_size=10000,
     padding = np.random.random((chunk_size,pad_size))
     print("padding", padding.shape)
     dictionary = np.hstack((dictionary, padding))
-    dictionary = dictionary.astype(np.float64)
+    dictionary = dictionary.astype(np.float32)
     dictionary /= np.linalg.norm(dictionary, axis=0)
     print("dictionary", dictionary.shape)
-    return torch.tensor(dictionary, device=device).float()
+    return torch.tensor(dictionary, device=device)

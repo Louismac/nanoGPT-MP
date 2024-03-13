@@ -8,8 +8,10 @@ from os.path import isdir, join
 from os import listdir
 from matching_pursuit import process_in_chunks
 np.set_printoptions(suppress=True)
+import scipy
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "mps")
 
 def read_audio(path, sr=44100):
     #search folder
@@ -36,23 +38,24 @@ def preprocess_data_embedding(path, chunk_size=2048, hop_length=1024, sr=44100,
                             chunk_size=chunk_size, 
                             iterations=num_atoms, name = name)
     print("data", data.shape)
-    indices = data[:,:num_atoms].long()
-    coeff = data[:,num_atoms:]
+    indices = data[:,:num_atoms].cpu().numpy()
+    coeff = data[:,num_atoms:].cpu().numpy()
     d_size = len(dictionary.T)
-    print(indices.shape, d_size)
-    binary_repr = torch.zeros(indices.shape[0], d_size, dtype=torch.float32, device=device)
-    for i in range(indices.shape[1]):
-        # This ensures we only work within the actual length of each sequence in the batch
-        binary_repr.scatter_add_(1, indices[:, i:i+1], torch.ones_like(indices[:, i:i+1], dtype=torch.float32))
-    binary_repr.clamp_(max=1)
-    print(binary_repr.shape)
-    ctr = 0
-    for i, b in enumerate(binary_repr):
-        if b.sum().item() < 10:
-            ctr+=1
-    print(ctr)
-    sparse = torch.cat([binary_repr.float(), coeff], dim=-1)
-    return data, sparse
+    num_frames = len(data)
+    values = []
+    sparse_indices = []
+    for row, indexes in enumerate(indices):
+        for i in indexes:
+            sparse_indices.append([row,i])
+            values.append(1)
+        for i, c in enumerate(coeff[row]):
+            sparse_indices.append([row,i+d_size])
+            values.append(c)
+    sparse_indices = np.array(sparse_indices)
+    sparse_tensor = scipy.sparse.csr_array((values, 
+                                            (sparse_indices[:,0],sparse_indices[:,1])), 
+                                            shape = (num_frames, d_size+num_atoms))
+    return data, sparse_tensor
 
 class MatchingPursuitDataset(Dataset):
     def __init__(self, x_frames, y_frames):

@@ -6,13 +6,13 @@ import os
 num_atoms = 100
 dictionary_size = 10000
 #can be directory or file
-file_name = "taylor_vocals"
-output_name = "taylor_vocals"
-# file_name = "Wiley_10.wav"
-# output_name = "wiley"
+# file_name = "taylor_vocals"
+# output_name = "taylor_vocals"
+file_name = "Wiley_10.wav"
+output_name = "wiley"
 chunk_size = 2048
-hop_length = chunk_size//2
-sr = 44100
+hop_length = chunk_size//4
+sr = 22050
 dictionary = get_dictionary(chunk_size=chunk_size, max_freq=10000, sr=sr, dictionary_size=dictionary_size)
 dictionary_size = len(dictionary[0])
 cache_name = get_run_name(output_name, chunk_size, dictionary_size, num_atoms)
@@ -32,8 +32,8 @@ val_data = np.array(val_data, dtype=np.float32)
 train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_x.bin'))
 val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val_x.bin'))
 
-train_data = sparse[:int(n*0.9)].cpu().numpy()
-val_data = sparse[int(n*0.9):].cpu().numpy()
+train_data = sparse[:int(n*0.9)].toarray()
+val_data = sparse[int(n*0.9):].toarray()
 train_data = np.array(train_data, dtype=np.float32)
 val_data = np.array(val_data, dtype=np.float32)
 train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_y.bin'))
