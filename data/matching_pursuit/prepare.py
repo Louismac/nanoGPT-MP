@@ -2,6 +2,7 @@ from matching_pursuit import get_dictionary, get_run_name
 from matching_pursuit_data import preprocess_data_embedding
 import numpy as np
 import os
+from scipy.sparse import save_npz
 
 num_atoms = 100
 dictionary_size = 10000
@@ -32,9 +33,7 @@ val_data = np.array(val_data, dtype=np.float32)
 train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_x.bin'))
 val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val_x.bin'))
 
-train_data = sparse[:int(n*0.9)].toarray()
-val_data = sparse[int(n*0.9):].toarray()
-train_data = np.array(train_data, dtype=np.float32)
-val_data = np.array(val_data, dtype=np.float32)
-train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_y.bin'))
-val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val_y.bin'))
+train_data = sparse[:int(n*0.9)]
+val_data = sparse[int(n*0.9):]
+save_npz(os.path.join(os.path.dirname(__file__), cache_name, 'train_y.bin'), train_data)
+save_npz(os.path.join(os.path.dirname(__file__), cache_name, 'val_y.bin'), val_data)
