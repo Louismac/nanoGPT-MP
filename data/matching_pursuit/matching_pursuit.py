@@ -1,14 +1,63 @@
 import numpy as np
-from sklearn.linear_model import OrthogonalMatchingPursuit
 import numpy as np
-from os.path import exists, join
-from os import mkdir
+from os.path import exists, join, isdir
+from os import mkdir, listdir
 from scipy.signal import get_window
 import torch
 import sys
+import librosa
+import scipy
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-device = torch.device("mps" if torch.backends.mps.is_available()else "mps")
+# device = torch.device("mps" if torch.backends.mps.is_available() else "mps")
+
+def read_audio(path, sr=44100):
+    print("reading audio")
+    #search folder
+    x = [0]
+    if not isdir(path):
+        x, sr = librosa.load(path, sr=sr) 
+    else:
+        files = listdir(path)
+        x = np.array([0])
+        for file in files:
+            if not ".DS" in file:
+                audio, sr, = librosa.load(join(path, file), sr = sr)
+                x = np.concatenate((x, audio))
+    print("loaded audio", len(x)/sr)
+    return torch.tensor(x, device=device).float()
+
+def preprocess_data_embedding(path, chunk_size=2048, hop_length=1024, sr=44100, 
+                       num_atoms=100, dictionary=None, name=""):
+    x = read_audio(path, sr)
+    #Get chunks (this takes time!)
+    print("process_in_chunks")
+    data = process_in_chunks(x, 
+                            dictionary, 
+                            hop_length=hop_length,
+                            chunk_size=chunk_size, 
+                            iterations=num_atoms, name = name)
+    print("data", data.shape)
+    # indices = data[:,:num_atoms].cpu().numpy()
+    # coeff = data[:,num_atoms:].cpu().numpy()
+    # d_size = len(dictionary.T)
+    # num_frames = len(data)
+    # values = []
+    # sparse_indices = []
+    # print("prepping sparse")
+    # for row, indexes in enumerate(indices):
+    #     for i in indexes:
+    #         sparse_indices.append([row,i])
+    #         values.append(1)
+    #     for i, c in enumerate(coeff[row]):
+    #         sparse_indices.append([row,i+d_size])
+    #         values.append(c)
+    # sparse_indices = np.array(sparse_indices)
+    # print("making sparse")
+    # sparse_tensor = scipy.sparse.csr_array((values, 
+    #                                         (sparse_indices[:,0],sparse_indices[:,1])), 
+    #                                         shape = (num_frames, d_size+num_atoms))
+    return data
 
 def get_run_name(name, chunk_size, dictionary_size, num_atoms):
     dir = name + "_" + str(chunk_size) + "_" + str(dictionary_size) + "_" + str(num_atoms)

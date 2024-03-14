@@ -9,6 +9,8 @@ __pycache__/
 *.pyc
 *.npy
 *.wav
+*.mp3
+*.npz
 input.txt
 env/
 venv/

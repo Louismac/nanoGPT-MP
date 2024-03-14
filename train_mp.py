@@ -79,7 +79,7 @@ name = "test"
 from data.matching_pursuit.matching_pursuit import get_run_name
 
 # system
-device = 'mps' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -125,28 +125,43 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-from scipy.sparse import load_npz
+def get_sparse(y):
+    #sparse
+    indices = y[:,:,:config["num_atoms"]].long()
+    coeff = y[:,:,config["num_atoms"]:]
+    b, s, a = indices.shape
+    sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
+    for i in range(a):
+        #DIM, INDICES, VALUES
+        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
+    sparse.clamp_(max=1)
+    #ADD IN COEFF
+    sparse = torch.cat([sparse.float(), coeff], dim=-1)
+    return sparse
+
 # poor man's data loader
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(cache_path, 'train_x.bin'), dtype=np.float32, mode='r')
-        sparse = load_npz(os.path.join(cache_path, 'train_y.bin'))
+        data = np.memmap(os.path.join(cache_path, 'train.bin'), dtype=np.float32, mode='r')
+        # sparse = load_npz(os.path.join(cache_path, 'train_y.bin.npz'))
     else:
-        data = np.memmap(os.path.join(cache_path, 'val_x.bin'), dtype=np.float32, mode='r')
-        sparse = load_npz(os.path.join(cache_path, 'val_y.bin'))
+        data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
+        # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
     num_features = (config["num_atoms"]*2)
     data = data.reshape(len(data)//num_features, num_features)
-    num_features = config["dictionary_size"] + config["num_atoms"]
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
-    y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).toarray().astype(np.float32)) for i in ix]) 
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
+    #y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).toarray().astype(np.float32)) for i in ix]) 
+    y = get_sparse(y)
+    
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)

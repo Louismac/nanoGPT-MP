@@ -224,6 +224,7 @@ class GPT(nn.Module):
             # print("coef_target", coef_target.shape)
             bce_loss = self.bce_loss_func(idx, idx_target)
             mse_loss = F.mse_loss(coef, coef_target)
+            # print("bce_loss", bce_loss.cpu().item(), "mse_loss", mse_loss.cpu().item())
             loss = bce_loss+mse_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
