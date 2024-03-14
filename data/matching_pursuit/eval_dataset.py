@@ -1,6 +1,7 @@
 from matching_pursuit import reconstruct_from_embedding_chunks, get_dictionary, get_run_name, preprocess_data_embedding
 from datetime import datetime
 import soundfile as sf
+import torch
 
 dictionary_size = 10000
 #can be directory or file
@@ -9,8 +10,8 @@ output_name = "taylor_vocals"
 # file_name = "Wiley_10.wav"
 # output_name = "wiley"
 chunk_size = 2048
-hop_length = chunk_size//2
-sr = 44100
+hop_length = chunk_size//4
+sr = 22050
 num_atoms=100
 dictionary = get_dictionary(chunk_size=chunk_size, max_freq=10000, sr=sr, dictionary_size=dictionary_size)
 dictionary_size = len(dictionary[0])
@@ -21,13 +22,16 @@ data = preprocess_data_embedding(file_name,
                                 chunk_size=chunk_size, hop_length=hop_length, 
                                 dictionary=dictionary, name=output_name)
 
-# create the train and test splits
-print("data", data.shape)
-audio = reconstruct_from_embedding_chunks(data, dictionary, chunk_size, hop_length).cpu().numpy()
-# audio = reconstruct_from_normalised_chunks(y_frames, dictionary, chunk_size, hop_length, cmax, cmin)
+labels = data[:,:num_atoms]
+# Get unique labels and their counts
+unique_labels, counts = torch.unique(labels, return_counts=True)
+# Sort labels and reindex counts
+sorted_indices = torch.argsort(counts)
+sorted_labels = unique_labels[sorted_indices]
+sorted_counts = counts[sorted_indices]
 
-print(len(audio))
-timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
+# Display sorted class distribution
+for label, count in zip(sorted_labels.tolist(), sorted_counts.tolist()):
+    print(f'Class {label}: {count} occurrences')
 
-# # WRITE AUDIO
-sf.write(f"{output_name}_{timestampStr}.wav", audio, 44100)
+
