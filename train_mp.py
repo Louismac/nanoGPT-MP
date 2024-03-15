@@ -128,6 +128,7 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 def get_sparse(y):
     #sparse
     indices = y[:,:,:config["num_atoms"]].long()
+    indices = indices[indices != 0]
     coeff = y[:,:,config["num_atoms"]:]
     b, s, a = indices.shape
     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)

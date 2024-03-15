@@ -20,16 +20,16 @@ out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+temperature = 0.7 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 5000 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 
 num_atoms = 100
-file_name = "taylor_vocals"
-name = "taylor_vocals"
+file_name = "taylor_songs"
+name = "taylor_songs"
 chunk_size = 2048
-hop_length = chunk_size//2
-sr = 44100
+hop_length = chunk_size//4
+sr = 22050
 dictionary_size = 10000
 dataset = 'matching_pursuit'
 batch_size = 64
@@ -45,28 +45,29 @@ print("config", config)
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
 cache_path = os.path.join("data", dataset, cache_path)
 # poor man's data loader
+# poor man's data loader
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
-        data = np.memmap(os.path.join(cache_path, 'train_x.bin'), dtype=np.float32, mode='r')
-        sparse = np.memmap(os.path.join(cache_path, 'train_y.bin'), dtype=np.float32, mode='r')
+        data = np.memmap(os.path.join(cache_path, 'train.bin'), dtype=np.float32, mode='r')
+        # sparse = load_npz(os.path.join(cache_path, 'train_y.bin.npz'))
     else:
-        data = np.memmap(os.path.join(cache_path, 'val_x.bin'), dtype=np.float32, mode='r')
-        sparse = np.memmap(os.path.join(cache_path, 'val_y.bin'), dtype=np.float32, mode='r')
+        data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
+        # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
     num_features = (config["num_atoms"]*2)
     data = data.reshape(len(data)//num_features, num_features)
-    num_features = config["dictionary_size"] + config["num_atoms"]
-    sparse = sparse.reshape(len(sparse)//num_features, num_features)
-    ix = torch.randint(len(data) - config["block_size"], (config["batch_size"],))
-    x = torch.stack([torch.from_numpy((data[i:i+config["block_size"]]).astype(np.float32)) for i in ix])
-    y = torch.stack([torch.from_numpy((sparse[i+1:i+1+config["block_size"]]).astype(np.float32)) for i in ix]) 
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    return x, y
+    #y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).toarray().astype(np.float32)) for i in ix]) 
+    
+    return x
 # -----------------------------------------------------------------------------
 
 torch.manual_seed(seed)
@@ -122,16 +123,16 @@ else:
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
 
-x,y = get_batch("train")
-print("x[0]", x[0].shape)
+dictionary = get_dictionary(chunk_size=config["chunk_size"], max_freq=10000, 
+                                        sr=config["sr"], dictionary_size=config["dictionary_size"])
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x[0].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
-            print(y.shape)
-            dictionary = get_dictionary(chunk_size=config["chunk_size"], max_freq=10000, 
-                                        sr=config["sr"], dictionary_size=config["dictionary_size"])
+            x = get_batch("train")
+            seed = x[0].unsqueeze(0)
+            print("Seed", seed.shape)
+            y = model.generate(seed, max_new_tokens, temperature=temperature, top_k=top_k)
             audio = reconstruct_from_embedding_chunks(y.squeeze(0), 
                                                       dictionary=dictionary, 
                                                       chunk_size=config["chunk_size"], 
@@ -140,4 +141,7 @@ with torch.no_grad():
             timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
             # # WRITE AUDIO
             name = config["name"]
-            sf.write(f"{name}_{timestampStr}.wav", audio, 44100)
+            name = f"{name}_{timestampStr}.wav"
+            if not os.path.exists(os.path.join(cache_path, "audio")):
+                os.mkdir(os.path.join(cache_path, "audio"))
+            sf.write(os.path.join(cache_path, "audio", name), audio, config["sr"])

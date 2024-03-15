@@ -4,14 +4,14 @@ import soundfile as sf
 
 dictionary_size = 10000
 #can be directory or file
-file_name = "taylor_vocals"
-output_name = "taylor_vocals"
+file_name = "test_short.wav"
+output_name = "test_short"
 # file_name = "Wiley_10.wav"
 # output_name = "wiley"
 chunk_size = 2048
-hop_length = chunk_size//2
+hop_length = chunk_size//4
 sr = 44100
-num_atoms=100
+num_atoms= 600
 dictionary = get_dictionary(chunk_size=chunk_size, max_freq=10000, sr=sr, dictionary_size=dictionary_size)
 dictionary_size = len(dictionary[0])
 cache_name = get_run_name(output_name, chunk_size, dictionary_size, num_atoms)
@@ -28,6 +28,7 @@ audio = reconstruct_from_embedding_chunks(data, dictionary, chunk_size, hop_leng
 
 print(len(audio))
 timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
-
+name = f"{output_name}_{timestampStr}.wav"
+path = os.path.join("recon_audio", name)
 # # WRITE AUDIO
-sf.write(f"{output_name}_{timestampStr}.wav", audio, 44100)
+sf.write(path, audio, 44100)
