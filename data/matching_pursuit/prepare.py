@@ -1,45 +1,45 @@
-from matching_pursuit import get_dictionary, get_run_name, preprocess_data_embedding
 import numpy as np
 import os
-from scipy.sparse import save_npz
+import csv
+from matching_pursuit import get_run_name
 
 num_atoms = 100
-dictionary_size = 10000
-#can be directory or file
-file_name = "taylor_songs"
-output_name = "taylor_songs"
-# file_name = "Wiley_10.wav"
-# output_name = "wiley"
 chunk_size = 2048
+dictionary_size = chunk_size//2
 hop_length = chunk_size//4
-sr = 22050
-dictionary = get_dictionary(chunk_size=chunk_size, max_freq=10000, sr=sr, dictionary_size=dictionary_size)
-dictionary_size = len(dictionary[0])
-cache_name = get_run_name(output_name, chunk_size, dictionary_size, num_atoms)
-data = preprocess_data_embedding(file_name, 
-                                sr = sr, num_atoms=num_atoms,
-                                chunk_size=chunk_size, hop_length=hop_length, 
-                                dictionary=dictionary, name=output_name)
+cache_name = get_run_name("taylor", chunk_size, dictionary_size, num_atoms)
+path = "/home/louis/Documents/notebooks/fastmpwithmultigabor/libltfat/examples/multigabormp/taylor/converted_wavs"
+files = os.listdir(path)
+data = []
+for p in files:
+    if p.endswith(".csv"): 
+        print(p)
+        p = os.path.join(path, p)
+        with open(p, 'r') as f:
+            reader = csv.reader(f)
+            n_features = 3
+            def format(atoms):
+                #drop frame number
+                atoms = np.array(atoms)[1:]
+                o = np.zeros(num_atoms*n_features)
+                max_count = len(atoms)//n_features
+                if max_count > num_atoms:
+                    max_count = num_atoms
+                for i in range(max_count):
+                    for j in range(n_features):
+                        o[i + ((num_atoms*j))] = atoms[(i*n_features)+j]
+                return o
+            song_data = np.array([format(row) for row in reader])
+            print(song_data.shape)
+            data.append(song_data)
+data = np.vstack(data)           
 
 # create the train and test splits
 print("data", data.shape)
 n = len(data)
-train_data = data[:int(n*0.9)].cpu().numpy()
-val_data = data[int(n*0.9):].cpu().numpy()
+train_data = data[:int(n*0.9)]
+val_data = data[int(n*0.9):]
 train_data = np.array(train_data, dtype=np.float32)
 val_data = np.array(val_data, dtype=np.float32)
 train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train.bin'))
 val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val.bin'))
-
-# train_data = data[:int(n*0.9)].cpu().numpy()
-# val_data = data[int(n*0.9):].cpu().numpy()
-# train_data = np.array(train_data, dtype=np.float32)
-# val_data = np.array(val_data, dtype=np.float32)
-# train_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'train_x.bin'))
-# val_data.tofile(os.path.join(os.path.dirname(__file__), cache_name, 'val_x.bin'))
-
-# train_data = sparse[:int(n*0.9)]
-# val_data = sparse[int(n*0.9):]
-# print("saving sparse")
-# save_npz(os.path.join(os.path.dirname(__file__), cache_name, 'train_y'), train_data)
-# save_npz(os.path.join(os.path.dirname(__file__), cache_name, 'val_y'), val_data)

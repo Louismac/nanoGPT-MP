@@ -140,7 +140,7 @@ class GPT(nn.Module):
         self.transformer = Transformer(config)
         print("done transformer")
         #This layer is large 
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size + config.num_atoms, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size + (config.num_atoms*2), bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -186,6 +186,7 @@ class GPT(nn.Module):
         #inputs = batch x block_size x features (num_atoms*2)
         idx = inputs[:,:,:self.config.num_atoms].long()
         coef = inputs[:,:,self.config.num_atoms:]
+        mag = coef[:,:,:self.config.num_atoms]
         device = idx.device 
         b, t, f = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -194,8 +195,8 @@ class GPT(nn.Module):
         #this embeds the index in dictionary
         idx = torch.clamp(idx, min=0, max=9999)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
-        #weight emedding by coeff
-        weighted_tok_emb = tok_emb *  coef.unsqueeze(-1)
+        #weight emedding by mag
+        weighted_tok_emb = tok_emb *  mag.unsqueeze(-1)
         #sum
         summed_emb = torch.sum(weighted_tok_emb, dim=2)
         b,t,e = summed_emb.shape
@@ -223,8 +224,13 @@ class GPT(nn.Module):
             # print("idx_target", idx_target.shape, idx_target.dtype)
             # print("coef_target", coef_target.shape)
             bce_loss = self.bce_loss_func(idx, idx_target)
-            mse_loss = F.mse_loss(coef, coef_target)
+            #mask out zero padded atoms
+            mask = coef_target > 0
+            mse_loss_unreduced = F.mse_loss(coef, coef_target, reduction='none')  # Element-wise MSE
+            mse_loss_masked = mse_loss_unreduced * mask  # Apply mask
+            mse_loss = mse_loss_masked.sum() / mask.sum() 
             # print("bce_loss", bce_loss.cpu().item(), "mse_loss", mse_loss.cpu().item())
+
             loss = bce_loss+mse_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position

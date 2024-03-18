@@ -12,13 +12,12 @@ wandb_run_name = 'mini-gpt'
 
 #mp stuff 
 num_atoms = 100
-file_name = "taylor_songs"
-name = "taylor_songs"
+file_name = "taylor"
+name = "taylor"
 chunk_size = 2048
 hop_length = chunk_size//4
-sr = 22050
-dictionary_size = 10000
-
+sr = 44100
+dictionary_size = chunk_size//2
 
 dataset = 'matching_pursuit'
 gradient_accumulation_steps = 1

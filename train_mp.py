@@ -149,7 +149,7 @@ def get_batch(split):
     else:
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
         # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
-    num_features = (config["num_atoms"]*2)
+    num_features = (config["num_atoms"]*3)
     data = data.reshape(len(data)//num_features, num_features)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])

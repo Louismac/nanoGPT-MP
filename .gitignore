@@ -11,6 +11,7 @@ __pycache__/
 *.wav
 *.mp3
 *.npz
+*.csv
 input.txt
 env/
 venv/
