@@ -1,16 +1,35 @@
-import numpy as np
-import cupy as cp
+import torch
+import torch.nn as nn
 
-# Create a NumPy array
-np_array = np.array([1, 2, 3, 4, 5])
+if torch.backends.mps.is_available():
+    mps_device = torch.device("mps")
+    x = torch.ones(1, device=mps_device)
+    print (x)
+else:
+    print ("MPS device not found.")
 
-# Create a CuPy array
-cp_array = cp.array([1, 2, 3, 4, 5])
+class CustomEmbedding(nn.Module):
+    def __init__(self, in_channels=3, embedding_size=64):
+        super(CustomEmbedding, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, embedding_size, kernel_size=3, padding=1)
+    
+    def forward(self, x):
+        # x shape: (batch_size, block_size, num_atoms, 3)
+        # Reshape x to: (batch_size*block_size, 3, num_atoms) for Conv1d
+        batch_size, block_size, num_atoms, _ = x.size()
+        x = x.view(batch_size * block_size, 3, num_atoms)  # Combine batch and block for batched processing
+        x = self.conv1(x)
+        # Aggregate features across atoms, reshape back to include block_size
+        x = x.sum(dim=2).view(batch_size, block_size, -1)  #
+        return x
 
-# Check if the array is a NumPy array
-if np_array.__class__ == np.ndarray:
-    print("np_array is a NumPy array")
+# Example usage
+batch_size = 64
+block_size = 256
+seq_len = 100
+embedding = 100
+model = CustomEmbedding(embedding_size=embedding)
+input_triplets = torch.rand(batch_size, block_size, seq_len, 3)  # Random example data
+embedded = model(input_triplets)
+print(embedded.shape)
 
-# Check if the array is a CuPy array
-if cp_array.__class__ == cp.ndarray:
-    print("cp_array is a CuPy array", type(cp_array))

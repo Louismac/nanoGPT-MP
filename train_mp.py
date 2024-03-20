@@ -26,8 +26,8 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
+# import torch._dynamo
+# torch._dynamo.config.suppress_errors = True
 from model_mp import GPTConfig, GPT
 from torchsummary import summary
 # -----------------------------------------------------------------------------
@@ -70,6 +70,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 
 
 num_atoms = 20
+num_features=3
 file_name = "../assets/Wiley_10.wav"
 chunk_size = 2048
 hop_length = chunk_size//4
@@ -79,7 +80,7 @@ name = "test"
 from data.matching_pursuit.matching_pursuit import get_run_name
 
 # system
-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = 'mps' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -125,19 +126,19 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-def get_sparse(y):
-    #sparse
-    indices = y[:,:,:config["num_atoms"]].long()
-    coeff = y[:,:,config["num_atoms"]:]
-    b, s, a = indices.shape
-    sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
-    for i in range(a):
-        #DIM, INDICES, VALUES
-        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
-    sparse.clamp_(max=1)
-    #ADD IN COEFF
-    sparse = torch.cat([sparse.float(), coeff], dim=-1)
-    return sparse
+# def get_sparse(y):
+#     #sparse
+#     indices = y[:,:,:config["num_atoms"]].long()
+#     coeff = y[:,:,config["num_atoms"]:]
+#     b, s, a = indices.shape
+#     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
+#     for i in range(a):
+#         #DIM, INDICES, VALUES
+#         sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
+#     sparse.clamp_(max=1)
+#     #ADD IN COEFF
+#     sparse = torch.cat([sparse.float(), coeff], dim=-1)
+#     return sparse
 
 # poor man's data loader
 def get_batch(split):
@@ -150,17 +151,23 @@ def get_batch(split):
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
         # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
     num_features = (config["num_atoms"]*3)
-    data = data.reshape(len(data)//num_features, num_features)
+    # print("num_frames", len(data)//num_features)
+    data = data.reshape(len(data)//num_features, config["num_atoms"], 3)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
+    # #drop phase
+    x = x[:,:,:,:config["num_features"]]
+    x[:,:,:,2] += torch.pi
+    x[:,:,:,2] /= (2*torch.pi)
+    y = y[:,:,:,:config["num_features"]]
+    y[:,:,:,2] /= (2*torch.pi)
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
     #y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).toarray().astype(np.float32)) for i in ix]) 
-    y = get_sparse(y)
     
     return x, y
 
@@ -180,7 +187,7 @@ if os.path.exists(meta_path):
 # model init
 meta_vocab_size = dictionary_size
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size, num_atoms = num_atoms,
-                  bias=bias, vocab_size=None, dropout=dropout) 
+                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features) 
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -228,7 +235,7 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.cuda.amp.GradScaler(enabled=False)
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -240,7 +247,7 @@ checkpoint = None # free up memory
 if compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
-    model = torch.compile(model) # requires PyTorch 2.0
+    model = torch.compile(model, backend="aot_eager") # requires PyTorch 2.0
     print("compilation complete")
 # wrap model into DDP container
 if ddp:
@@ -285,7 +292,7 @@ if wandb_log and master_process:
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
 print("summary", X.shape)
-summary(model, input_size=X.shape)
+# summary(model, input_size=X.shape)
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed

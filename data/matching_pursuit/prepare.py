@@ -2,13 +2,13 @@ import numpy as np
 import os
 import csv
 from matching_pursuit import get_run_name
-
+np.set_printoptions(precision=5, suppress=True)
 num_atoms = 100
 chunk_size = 2048
 dictionary_size = chunk_size//2
 hop_length = chunk_size//4
 cache_name = get_run_name("taylor", chunk_size, dictionary_size, num_atoms)
-path = "/home/louis/Documents/notebooks/fastmpwithmultigabor/libltfat/examples/multigabormp/taylor/converted_wavs"
+path = "/Users/lmccallum/Documents/nanoGPT-MP/taylor"
 files = os.listdir(path)
 data = []
 for p in files:
@@ -18,18 +18,20 @@ for p in files:
         with open(p, 'r') as f:
             reader = csv.reader(f)
             n_features = 3
-            def format(atoms):
+            def format_row(atoms):
                 #drop frame number
                 atoms = np.array(atoms)[1:]
-                o = np.zeros(num_atoms*n_features)
+                o = np.zeros((num_atoms, n_features))
                 max_count = len(atoms)//n_features
                 if max_count > num_atoms:
                     max_count = num_atoms
                 for i in range(max_count):
                     for j in range(n_features):
-                        o[i + ((num_atoms*j))] = atoms[(i*n_features)+j]
+                        o[i,j] = atoms[(i*n_features)+j]
                 return o
-            song_data = np.array([format(row) for row in reader])
+            song_data = np.array([format_row(atoms) for atoms in reader])
+            #normalise indexes
+            song_data[:,:,0] = song_data[:,:,0]/dictionary_size
             print(song_data.shape)
             data.append(song_data)
 data = np.vstack(data)           

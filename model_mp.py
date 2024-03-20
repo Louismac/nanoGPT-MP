@@ -37,8 +37,8 @@ class CausalSelfAttention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
+        self.attn_dropout = MPSDropout(config.dropout)
+        self.resid_dropout = MPSDropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
@@ -63,7 +63,7 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -84,7 +84,7 @@ class MLP(nn.Module):
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
         self.gelu    = nn.GELU()
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
+        self.dropout = MPSDropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -107,6 +107,24 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+
+class CustomEmbedding(nn.Module):
+    def __init__(self, in_channels=3, embedding_size=64):
+        super(CustomEmbedding, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels, embedding_size, kernel_size=in_channels, padding=1)
+        self.in_channels = in_channels
+    
+    def forward(self, x):
+        # x shape: (batch_size, block_size, num_atoms, num_features)
+        # Reshape x to: (batch_size*block_size, num_features, num_atoms) for Conv1d
+        batch_size, block_size, num_atoms, features = x.size()
+        #kernel is same size as features, passed over each atom one by one
+        x = x.view(batch_size * block_size, features, num_atoms)  # Combine batch and block for batched processing
+        x = self.conv1(x)
+        # Aggregate features across atoms, reshape back to include block_size
+        x = x.sum(dim=2).view(batch_size, block_size, -1)  #
+        return x
+
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -115,6 +133,7 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     num_atoms: int = 100
+    num_features: int = 3
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -122,12 +141,29 @@ class Transformer(nn.Module):
     def __init__(self, config):
         super().__init__()
         print("vocab_size", config.vocab_size,"n_embd", config.n_embd)
-        self.wte = nn.Embedding(config.vocab_size, config.n_embd)
+        self.wte = CustomEmbedding(config.num_features, config.n_embd)
         print("block_size", config.block_size,"n_embd", config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
-        self.drop = nn.Dropout(config.dropout)
+        self.drop = MPSDropout(config.dropout)
         self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
         self.ln_f = LayerNorm(config.n_embd, bias=config.bias)
+
+class MPSDropout(torch.nn.Module):
+    def __init__(self, p=0.5):
+        super(MPSDropout, self).__init__()
+        # Dropout probability
+        self.p = p
+
+    def forward(self, x):
+        # Apply dropout only during training
+        if self.training:
+            # Create a mask with values 0 or 1, where the probability of 0 is `self.p`
+            mask = (torch.rand(x.shape, device=x.device) > self.p).float()
+            # Apply the mask to `x`
+            return x * mask / (1.0 - self.p)  # Scale the output during training
+        else:
+            # During evaluation, just return x
+            return x
 
 class GPT(nn.Module):
 
@@ -136,11 +172,11 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd)
+        print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd, config.num_features)
         self.transformer = Transformer(config)
         print("done transformer")
         #This layer is large 
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size + (config.num_atoms*2), bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.num_atoms*config.num_features, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -173,6 +209,36 @@ class GPT(nn.Module):
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
+    
+
+    #mask out zero padded atoms
+            
+    
+    def custom_loss(self, output, target):
+        cum_sum = 0
+        for n in range(self.config.num_features):
+            o = output[:,:,:,n]
+            t = target[:,:,:,n]
+            mask = t > 0
+            if n < 2:
+                mse_loss_unreduced = F.mse_loss(o, t, reduction='none')  
+            else:
+                #phase
+                mse_loss_unreduced = self.circular_loss(o,t)
+            mse_loss_masked = mse_loss_unreduced * mask  
+            mse_loss = mse_loss_masked.sum() / mask.sum() 
+            print("loss",n, mse_loss.cpu().item())
+            cum_sum += mse_loss
+          
+        return cum_sum/self.config.num_features
+
+    #accounts for wrap around of phase
+    def circular_loss(self, output, target):
+        output = torch.remainder(output, 1)
+        target = torch.remainder(target, 1)
+        angle_diff = torch.remainder(output - target + 0.5, 1) - 0.5
+        loss = torch.mean(angle_diff ** 2)
+        return loss
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -183,61 +249,35 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, inputs, targets=None):
-        #inputs = batch x block_size x features (num_atoms*2)
-        idx = inputs[:,:,:self.config.num_atoms].long()
-        coef = inputs[:,:,self.config.num_atoms:]
-        mag = coef[:,:,:self.config.num_atoms]
-        device = idx.device 
-        b, t, f = idx.size()
+        device = inputs.device 
+        b, t, na, f = inputs.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
         # forward the GPT model itself
-        #this embeds the index in dictionary
-        idx = torch.clamp(idx, min=0, max=9999)
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
-        #weight emedding by mag
-        weighted_tok_emb = tok_emb *  mag.unsqueeze(-1)
-        #sum
-        summed_emb = torch.sum(weighted_tok_emb, dim=2)
-        b,t,e = summed_emb.shape
+        tok_emb = self.transformer.wte(inputs) # token embeddings of shape (b, t, n_embd)
         #this embeds the position in the block
         pos_emb = self.transformer.wpe(pos).squeeze(1) 
         #Expand to match the batch dimension 
         pos_emb = pos_emb.squeeze(1).unsqueeze(0).expand(b, -1, -1)
         #add together token and pos embedding
-        embedding_combined = summed_emb + pos_emb
+        embedding_combined = tok_emb + pos_emb
         x = self.transformer.drop(embedding_combined)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            split = self.config.vocab_size
-            idx = logits[:,:,:split]
-            coef = logits[:,:,split:]
-            # print("targets", targets.shape)
-            # print("idx", idx.shape, idx.dtype)
-            # print("coef", coef.shape)
-            idx_target = targets[:,:,:self.config.vocab_size]
-            coef_target = targets[:,:,self.config.vocab_size:]
-            # print("idx_target", idx_target.shape, idx_target.dtype)
-            # print("coef_target", coef_target.shape)
-            bce_loss = self.bce_loss_func(idx, idx_target)
-            #mask out zero padded atoms
-            mask = coef_target > 0
-            mse_loss_unreduced = F.mse_loss(coef, coef_target, reduction='none')  # Element-wise MSE
-            mse_loss_masked = mse_loss_unreduced * mask  # Apply mask
-            mse_loss = mse_loss_masked.sum() / mask.sum() 
-            # print("bce_loss", bce_loss.cpu().item(), "mse_loss", mse_loss.cpu().item())
-
-            loss = bce_loss+mse_loss
+            out = self.lm_head(x)
+            b,s,f = out.shape
+            out = out.view(b,s,self.config.num_atoms, self.config.num_features)
+            loss = self.custom_loss(out, targets)
+            # print("loss", loss)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x) # note: using list [-1] to preserve the time dim
+            out = self.lm_head(x) # note: using list [-1] to preserve the time dim
             loss = None
 
-        return logits, loss
+        return out, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
