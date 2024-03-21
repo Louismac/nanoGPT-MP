@@ -168,20 +168,19 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
-    
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-
+   
     x = x[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
-    x[:,:,:,2] += torch.pi
-    x[:,:,:,2] /= (2*torch.pi)
+    x[:,:,:,2::3] += torch.pi
+    x[:,:,:,2::3] /= (2*torch.pi)
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
-        x[:,:,:,0] /= (config["dictionary_size"])
+        x[:,:,:,::3] /= (config["dictionary_size"])
     else :
         #flatten [100x3 into 300]
         x = x.view(x.size(0), x.size(1), -1)
@@ -190,8 +189,8 @@ def get_batch(split):
 
     y = y[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
-    y[:,:,:,2] += torch.pi
-    y[:,:,:,2] /= (2*torch.pi)
+    y[:,:,:,2::3] += torch.pi
+    y[:,:,:,2::3] /= (2*torch.pi)
 
     if config["logit_loss"]:
         #flatten [100x3 into 300]

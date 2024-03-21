@@ -37,7 +37,5 @@ class CustomEmbedding(nn.Module):
 # print(embedded.shape)
 a = torch.arange(1*8*12).reshape((1,8,12))
 print(a.cpu().numpy())
-even = a[:,:,::2]
-odd = a[:,:,1::2]
-b = torch.cat((even,odd), dim=2)
-print(b.cpu().numpy())
+a[:,:,2::3] *= 10
+print(a.cpu().numpy())

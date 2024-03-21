@@ -11,7 +11,7 @@ wandb_project = 'mp'
 wandb_run_name = 'mini-gpt'
 
 #mp stuff 
-logit_loss = True
+logit_loss = False
 conv_input = True
 num_atoms = 20
 num_features = 3
@@ -24,7 +24,7 @@ dictionary_size = chunk_size//2
 dataset = 'matching_pursuit'
 gradient_accumulation_steps = 1
 batch_size = 64
-block_size = 128 # context of up to 256 previous characters
+block_size = 64 # context of up to 256 previous characters
 
 # baby GPT model :)
 n_layer = 6

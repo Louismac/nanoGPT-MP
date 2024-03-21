@@ -263,7 +263,7 @@ class GPT(nn.Module):
         mag_loss = mag_loss * mask  
         mag_loss = mag_loss.sum() / mask.sum() 
         
-        mask = phase_target > 0.5
+        mask = phase_target == 0.5
         phase_loss = self.circular_loss(phase, phase_target) 
         phase_loss = phase_loss * mask  
         phase_loss = phase_loss.sum() / mask.sum() 
@@ -282,7 +282,6 @@ class GPT(nn.Module):
         device = inputs.device 
         if self.config.conv_input:
             b, t, na, f = inputs.size()
-            pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
             # forward the GPT model itself
             tok_emb = self.transformer.wte(inputs) # token embeddings of shape (b, t, n_embd)
         else:
@@ -290,11 +289,12 @@ class GPT(nn.Module):
             coef = inputs[:,:,self.config.num_atoms:]
             mag = coef[:,:,:self.config.num_atoms]
             b, t, f = idx.size()
-            pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
             idx = torch.clamp(idx, min=0, max=9999)
             tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
             weighted_tok_emb = tok_emb *  mag.unsqueeze(-1)
             tok_emb = torch.sum(weighted_tok_emb, dim=2)
+
+        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
         #this embeds the position in the block
         pos_emb = self.transformer.wpe(pos).squeeze(1) 
         #Expand to match the batch dimension 
@@ -305,25 +305,23 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        if targets is not None:
-            #categorical
-            out = self.lm_head(x)
+        loss = None
+        
+        out = self.lm_head(x)
 
-            if self.config.logit_loss:
-                #relu the coeffiecents
-                out[:,:,self.config.vocab_size:] = F.relu(out[:,:,self.config.vocab_size:])
+        if self.config.logit_loss:
+            #relu the coeffiecents
+            out[:,:,self.config.vocab_size:] = F.sigmoid(out[:,:,self.config.vocab_size:])
+            if targets is not None:
                 loss = self.logit_loss(out, targets)
-            #all mse
-            else:
-                b,s,f = out.shape
-                out = out.view(b,s,self.config.num_atoms, self.config.num_features)
-                #relu everything!
-                out = F.relu(out)
-                loss = self.custom_mse_loss(out, targets)
+        #all mse
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            out = self.lm_head(x) # note: using list [-1] to preserve the time dim
-            loss = None
+            b,s,f = out.shape
+            out = out.view(b,s,self.config.num_atoms, self.config.num_features)
+            #relu everything!
+            out = F.sigmoid(out)
+            if targets is not None:
+                loss = self.custom_mse_loss(out, targets)
 
         return out, loss
 
@@ -446,11 +444,13 @@ class GPT(nn.Module):
         for i in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             chunks_cond = chunks if chunks.size(1) <= self.config.block_size else chunks[:, -self.config.block_size:]
-            # forw/ard the model to get the logits for the index in the sequence
+            # forward the model to get the logits for the index in the sequence
             # print("chunks",chunks_cond.shape)
             output, _ = self(chunks_cond)
-            # print("output",output.shape)
+            # print("output",output.cpu().numpy())
             if self.config.logit_loss:
+                #logit loss 
+                #comes out at vocab size logits + mags + phases (end to end)
                 split = self.config.vocab_size
                 #just the last in the sequence
                 logits = output[:,-1,:split]
@@ -465,20 +465,26 @@ class GPT(nn.Module):
                 chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
                 # print("chunk_next",chunk_next.shape)
                 if self.config.conv_input:
-                    #need to roll out to 2d
+                    #normalise indices
+                    chunk_next[:,:,::3] /= self.config.vocab_size
+                    #Turn to 2d for conv input on next pass
                     chunk_next = chunk_next.view(3, self.config.num_atoms)
                     chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
             else:
+                #mse loss
+                #comes out as normalised indexes + mags + phases (end to end)
                 split = self.config.num_atoms
                 #just the last in the sequence
                 chunk_next = output[:,-1,:].unsqueeze(0)
                 if self.config.conv_input:
+                    #Turn to 2d for conv input on next pass
                     chunk_next = chunk_next.view(3, self.config.num_atoms)
                     chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
                 else:
-                    #need to unnormalise
-                    chunk_next[:,:,0] = torch.floor(chunk_next[:,:,0]*self.config.dictionary_size)
+                    #need to unnormalise for embed input on next pass
+                    chunk_next[:,:,::3] = torch.floor(chunk_next[:,:,::3]*self.config.vocab_size)
             
+            # print("chunk_next",chunk_next.shape)
             chunks = torch.cat((chunks, chunk_next), dim=1)
         
         return chunks

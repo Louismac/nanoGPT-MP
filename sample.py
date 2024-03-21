@@ -19,7 +19,7 @@ import soundfile as sf
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 1 # number of samples to draw
+num_samples = 3 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -102,11 +102,11 @@ def get_batch(split):
    
     x = x[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
-    x[:,:,:,2] += torch.pi
-    x[:,:,:,2] /= (2*torch.pi)
+    x[:,:,:,2::3] += torch.pi
+    x[:,:,:,2::3] /= (2*torch.pi)
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
-        x[:,:,:,0] /= (config["dictionary_size"])
+        x[:,:,:,::3] /= (config["dictionary_size"])
     else :
         #flatten [100x3 into 300]
         x = x.view(x.size(0), x.size(1), -1)
@@ -115,8 +115,8 @@ def get_batch(split):
 
     y = y[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
-    y[:,:,:,2] += torch.pi
-    y[:,:,:,2] /= (2*torch.pi)
+    y[:,:,:,2::3] += torch.pi
+    y[:,:,:,2::3] /= (2*torch.pi)
 
     if config["logit_loss"]:
         #flatten [100x3 into 300]
@@ -132,7 +132,7 @@ def get_batch(split):
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt_conv_input_logit_loss.pt')
+    ckpt_path = os.path.join(out_dir, 'ckpt_conv_input_mse_loss_2.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
@@ -189,8 +189,9 @@ with torch.no_grad():
             #trim off seed
             y = y[config["block_size"]:]
             print(y.shape)
-            #embed input (end to end)
             if not config["conv_input"]:
+                #embed input 
+                # full indexes + mags + phases end to end 
                 interleaved = torch.empty_like(y)
                 indices = torch.arange(y.shape[1]) % 3
                 for i in range(3):
@@ -198,18 +199,18 @@ with torch.no_grad():
                     interleaved[:,indices==i] = y[:,i*n:(i+1)*n]
                 y = interleaved
             else:
-            #conv input (2d)
+                #conv input (2d)
+                # normalised indexes in a 2D tensor
                 interleaved = torch.zeros((y.shape[0],y.shape[1]*y.shape[2]), device=y.device)
                 indices = torch.arange(interleaved.shape[1]) % 3
                 for i in range(3):
                     n = config["num_atoms"]
                     interleaved[:,indices==i] = y[:,:,i]
                 y = interleaved
-            #unnormalise phase
-            y[:,2::3] = (y[:,2::3]*(2*torch.pi))-torch.pi
-            if not config["logit_loss"]:
                 #rediscretize to index (from 0-1)
                 y[:,::3] = torch.floor(y[:,::3]*config["dictionary_size"])
+            #unnormalise phase
+            y[:,2::3] = (y[:,2::3]*(2*torch.pi))-torch.pi
             #we get indexes and mags and phases, libltfat wants sparse complex coefficients 
             np.savetxt("output" + str(k) + ".csv", y.cpu().numpy(), delimiter=',',fmt='%.5f')
             
