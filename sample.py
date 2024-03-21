@@ -37,6 +37,7 @@ batch_size = 64
 block_size = 256 
 logit_loss = False
 num_features = 3
+conv_input = False
 
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
@@ -64,13 +65,13 @@ def get_sparse(y):
     y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
     indices = y[:,:,:config["num_atoms"]].long()
     coeff = y[:,:,config["num_atoms"]:]
-    # print("coeff", coeff.cpu().numpy())
-    # print("indices", indices.cpu().numpy())
     b, s, a = indices.shape
     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
     for i in range(a):
         #DIM, INDICES, VALUES
         sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
+    # print("indices", indices.cpu().numpy())
+    # print("sparse", sparse.cpu().numpy())
     sparse.clamp_(max=1)
     #ADD IN COEFF
     sparse = torch.cat([sparse.float(), coeff], dim=-1)
@@ -82,30 +83,44 @@ def get_batch(split):
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
         data = np.memmap(os.path.join(cache_path, 'train.bin'), dtype=np.float32, mode='r')
-        # sparse = load_npz(os.path.join(cache_path, 'train_y.bin.npz'))
     else:
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
-        # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
-    num_features = (config["num_atoms"]*3)
+    saved_atoms = 100
+    num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
-    data = data.reshape((len(data)//num_features, config["num_atoms"], 3))
+    data = data.reshape(len(data)//num_features, saved_atoms, 3)
+    data = data[:,:config["num_atoms"],:]
     # print("data", data.shape)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
+    
     x = x[:,:,:,:config["num_features"]]
-
-    #normalise into the range 0-1 (0 - dictionary_size)
-    # print(x[:,:,:,0].cpu().numpy())
-    x[:,:,:,0] /= (config["dictionary_size"])
     #normalise into the range 0-1 (from -pi - pi)
     x[:,:,:,2] += torch.pi
     x[:,:,:,2] /= (2*torch.pi)
-    
+    if config["conv_input"]:
+        #normalise into the range 0-1 (0 - dictionary_size)
+        x[:,:,:,0] /= (config["dictionary_size"])
+    else :
+        #flatten [100x3 into 300]
+        x = x.view(x.size(0), x.size(1), -1)
+        #deinterleave
+        x = torch.cat((x[:,:,::3], x[:,:,1::3],x[:,:,2::3]), dim=2)
+
     y = y[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
     y[:,:,:,2] += torch.pi
     y[:,:,:,2] /= (2*torch.pi)
+
+    if config["logit_loss"]:
+        #flatten [100x3 into 300]
+        y = y.view(y.size(0), y.size(1), -1)
+        #get sparse + end to end mags and phases
+        y = get_sparse(y)
+    else:
+        #normalise into the range 0-1 (0 - dictionary_size)
+        y[:,:,:,0] /= (config["dictionary_size"])
 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
@@ -113,25 +128,18 @@ def get_batch(split):
     else:
         x, y = x.to(device), y.to(device)
 
-    if config["logit_loss"]:
-        #if doing logit loss
-        y = y.view(y.size(0), y.size(1), -1)
-        y = get_sparse(y)
-    else:
-        y[:,:,:,0] /= (config["dictionary_size"])
-    # print("x",x.cpu().numpy())
-    # print("y",y.cpu().numpy())
     return x, y
 
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt_taylor_all_mse.pt')
+    ckpt_path = os.path.join(out_dir, 'ckpt_mse_loss.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
     gptconf.logit_loss = logit_loss 
     gptconf.num_features = num_features 
+    gptconf.conv_input = conv_input 
     model = GPT(gptconf)
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
@@ -176,10 +184,19 @@ print("x[0]", x[0].shape)
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            # print(x[0].cpu().numpy())
             y = model.generate(x[0].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
             print(y.shape)
+            #if the output is mse, re-interleave
+            if len(y.shape)==2:
+                interleaved = torch.empty_like(y)
+                indices = torch.arange(y.shape[1]) % 3
+                for i in range(3):
+                    interleaved[:,indices==i] = y[:,i::3]
+                y = interleaved
+                y[:,2::3] = (y[:,2::3]*(2*torch.pi))-torch.pi
+                #rediscretize to index (from 0-1)
+                y[:,::3] = torch.floor(y[:,::3]*config["dictionary_size"])
             #we get indexes and mags and phases, libltfat wants sparse complex coefficients 
             np.savetxt("output" + str(k) + ".csv", y.cpu().numpy(), delimiter=',',fmt='%.5f')
             

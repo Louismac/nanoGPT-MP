@@ -159,16 +159,18 @@ def get_batch(split):
         data = np.memmap(os.path.join(cache_path, 'train.bin'), dtype=np.float32, mode='r')
     else:
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
-    num_features = (config["num_atoms"]*3)
+    saved_atoms = 100
+    num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
-    data = data.reshape(len(data)//num_features, config["num_atoms"], 3)
+    data = data.reshape(len(data)//num_features, saved_atoms, 3)
+    data = data[:,:config["num_atoms"],:]
     # print("data", data.shape)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
     
     x = x[:,:,:,:config["num_features"]]
-     #normalise into the range 0-1 (from -pi - pi)
+    #normalise into the range 0-1 (from -pi - pi)
     x[:,:,:,2] += torch.pi
     x[:,:,:,2] /= (2*torch.pi)
     if config["conv_input"]:
@@ -185,12 +187,6 @@ def get_batch(split):
     y[:,:,:,2] += torch.pi
     y[:,:,:,2] /= (2*torch.pi)
 
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
-
     if config["logit_loss"]:
         #flatten [100x3 into 300]
         y = y.view(y.size(0), y.size(1), -1)
@@ -199,6 +195,12 @@ def get_batch(split):
     else:
         #normalise into the range 0-1 (0 - dictionary_size)
         y[:,:,:,0] /= (config["dictionary_size"])
+
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
 
     return x, y
 
@@ -378,6 +380,7 @@ while True:
         with ctx:
             logits, split_loss = model(X, Y)
             loss = split_loss.sum()
+            # loss = split_loss[0]
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

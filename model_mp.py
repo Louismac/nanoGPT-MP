@@ -119,11 +119,11 @@ class CustomEmbedding(nn.Module):
         # x shape: (batch_size, block_size, num_atoms, num_features)
         # Reshape x to: (batch_size*block_size, num_features, num_atoms) for Conv1d
         batch_size, block_size, num_atoms, features = x.size()
-        #kernel is same size as features, passed over each atom one by one
         x = x.view(batch_size * block_size, features, num_atoms)  # Combine batch and block for batched processing
-        x = self.conv1(x)
+        #kernel is same size as features, passed over each atom one by one
+        x = F.relu(self.conv1(x))
         # Aggregate features across atoms, reshape back to include block_size
-        x = x.sum(dim=2).view(batch_size, block_size, -1)  #
+        x = x.sum(dim=2).view(batch_size, block_size, -1)  
         return x
 
 @dataclass
@@ -310,11 +310,15 @@ class GPT(nn.Module):
             out = self.lm_head(x)
 
             if self.config.logit_loss:
+                #relu the coeffiecents
+                out[:,:,self.config.vocab_size:] = F.relu(out[:,:,self.config.vocab_size:])
                 loss = self.logit_loss(out, targets)
             #all mse
             else:
                 b,s,f = out.shape
                 out = out.view(b,s,self.config.num_atoms, self.config.num_features)
+                #relu everything!
+                out = F.relu(out)
                 loss = self.custom_mse_loss(out, targets)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
@@ -442,9 +446,10 @@ class GPT(nn.Module):
         for i in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             chunks_cond = chunks if chunks.size(1) <= self.config.block_size else chunks[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
+            # forw/ard the model to get the logits for the index in the sequence
+            print("chunks",chunks_cond.shape)
             output, _ = self(chunks_cond)
-
+            print("output",output.shape)
             if self.config.logit_loss:
                 split = self.config.vocab_size
                 #just the last in the sequence
@@ -456,26 +461,23 @@ class GPT(nn.Module):
                 probs = F.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
                 idx_next, _ = torch.sort(idx_next)
+                coef = output[:,-1,split:]
+                chunk_next = torch.cat((idx_next, coef), dim=1)
+                if self.config.conv_input:
+                    #need to roll out to 2d
+                else:
+                    #nothing (already unnormalised)
+                    
+                
             else:
                 split = self.config.num_atoms
                 #just the last in the sequence
-                indexes = output[:,-1,:split]
-                #rediscretize to index (from 0-1)
-                idx_next = torch.floor(indexes*self.config.vocab_size)
+                chunk_next = output[:,-1,:].unsqueeze(0)
+                if self.config.conv_input:
+                    #need to roll out to 2d
+                else:
+                    #need to unnormalise
             
-            #unnormalise phase (back to -pi - pi)
-            coef = output[:,-1,split:]
-            coef[:,split:] = (coef[:,split:] * (2*torch.pi)) - torch.pi
-            #this is 1 frame (e.g. 1x300)
-            chunk_next = torch.cat((idx_next, coef), axis=1)
-            #We need to make 2d and interleaved for libltfat
-            #Reshape the tensor to 3x100, grouping every 100 elements into separate rows
-            chunk_next = chunk_next.view(self.config.num_features, self.config.num_atoms)
-            #Transpose the tensor to switch rows and columns, achieving the interleaving effect
-            chunk_next = chunk_next.t()
-            # print(chunk_next[:,0].cpu().numpy())
-            chunk_next = chunk_next.unsqueeze(0).unsqueeze(0)
-            # append sampled index to the running sequence and continue
             chunks = torch.cat((chunks, chunk_next), dim=1)
 
-        return chunks.view(chunks.shape[0],chunks.shape[1],-1)
+        return chunks
