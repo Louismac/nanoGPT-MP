@@ -94,7 +94,12 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
-    
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+   
     x = x[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
     x[:,:,:,2] += torch.pi
@@ -122,18 +127,12 @@ def get_batch(split):
         #normalise into the range 0-1 (0 - dictionary_size)
         y[:,:,:,0] /= (config["dictionary_size"])
 
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
-    else:
-        x, y = x.to(device), y.to(device)
-
     return x, y
 
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt_mse_loss.pt')
+    ckpt_path = os.path.join(out_dir, 'ckpt_conv_input_logit_loss.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
@@ -184,17 +183,31 @@ print("x[0]", x[0].shape)
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x[0].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
+            pick = np.random.randint(len(x))
+            y = model.generate(x[pick].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
+            #trim off seed
+            y = y[config["block_size"]:]
             print(y.shape)
-            #if the output is mse, re-interleave
-            if len(y.shape)==2:
+            #embed input (end to end)
+            if not config["conv_input"]:
                 interleaved = torch.empty_like(y)
                 indices = torch.arange(y.shape[1]) % 3
                 for i in range(3):
-                    interleaved[:,indices==i] = y[:,i::3]
+                    n = config["num_atoms"]
+                    interleaved[:,indices==i] = y[:,i*n:(i+1)*n]
                 y = interleaved
-                y[:,2::3] = (y[:,2::3]*(2*torch.pi))-torch.pi
+            else:
+            #conv input (2d)
+                interleaved = torch.zeros((y.shape[0],y.shape[1]*y.shape[2]), device=y.device)
+                indices = torch.arange(interleaved.shape[1]) % 3
+                for i in range(3):
+                    n = config["num_atoms"]
+                    interleaved[:,indices==i] = y[:,:,i]
+                y = interleaved
+            #unnormalise phase
+            y[:,2::3] = (y[:,2::3]*(2*torch.pi))-torch.pi
+            if not config["logit_loss"]:
                 #rediscretize to index (from 0-1)
                 y[:,::3] = torch.floor(y[:,::3]*config["dictionary_size"])
             #we get indexes and mags and phases, libltfat wants sparse complex coefficients 

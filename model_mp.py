@@ -447,9 +447,9 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             chunks_cond = chunks if chunks.size(1) <= self.config.block_size else chunks[:, -self.config.block_size:]
             # forw/ard the model to get the logits for the index in the sequence
-            print("chunks",chunks_cond.shape)
+            # print("chunks",chunks_cond.shape)
             output, _ = self(chunks_cond)
-            print("output",output.shape)
+            # print("output",output.shape)
             if self.config.logit_loss:
                 split = self.config.vocab_size
                 #just the last in the sequence
@@ -462,22 +462,23 @@ class GPT(nn.Module):
                 idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
                 idx_next, _ = torch.sort(idx_next)
                 coef = output[:,-1,split:]
-                chunk_next = torch.cat((idx_next, coef), dim=1)
+                chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
+                # print("chunk_next",chunk_next.shape)
                 if self.config.conv_input:
                     #need to roll out to 2d
-                else:
-                    #nothing (already unnormalised)
-                    
-                
+                    chunk_next = chunk_next.view(3, self.config.num_atoms)
+                    chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
             else:
                 split = self.config.num_atoms
                 #just the last in the sequence
                 chunk_next = output[:,-1,:].unsqueeze(0)
                 if self.config.conv_input:
-                    #need to roll out to 2d
+                    chunk_next = chunk_next.view(3, self.config.num_atoms)
+                    chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
                 else:
                     #need to unnormalise
+                    chunk_next[:,:,0] = torch.floor(chunk_next[:,:,0]*self.config.dictionary_size)
             
             chunks = torch.cat((chunks, chunk_next), dim=1)
-
+        
         return chunks

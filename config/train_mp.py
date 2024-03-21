@@ -11,8 +11,8 @@ wandb_project = 'mp'
 wandb_run_name = 'mini-gpt'
 
 #mp stuff 
-logit_loss = False
-conv_input = False
+logit_loss = True
+conv_input = True
 num_atoms = 20
 num_features = 3
 name = "taylor_vocals"
