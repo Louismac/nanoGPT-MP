@@ -1,8 +1,9 @@
 import numpy as np
 import os
 import csv
+import sys
 from matching_pursuit import get_run_name
-np.set_printoptions(precision=5, suppress=True)
+np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize)
 num_atoms = 100
 chunk_size = 2048
 dictionary_size = chunk_size//2
@@ -18,20 +19,22 @@ for p in files:
         with open(p, 'r') as f:
             reader = csv.reader(f)
             n_features = 3
-            def format_row(atoms):
+            def get_frame(atoms):
                 #drop frame number
                 atoms = np.array(atoms)[1:]
-                o = np.zeros((num_atoms, n_features))
+                frame = np.zeros((num_atoms, n_features))
                 max_count = len(atoms)//n_features
                 if max_count > num_atoms:
                     max_count = num_atoms
-                for i in range(max_count):
-                    for j in range(n_features):
-                        o[i,j] = atoms[(i*n_features)+j]
-                return o
-            song_data = np.array([format_row(atoms) for atoms in reader])
+                for atom in range(max_count):
+                    for f in range(n_features):
+                        index = (atom*n_features)+f
+                        val = atoms[index]
+                        print(atom, f, index, val)
+                        frame[atom,f] = val
+                return frame
+            song_data = np.array([get_frame(atoms) for atoms in reader])
             #normalise indexes
-            song_data[:,:,0] = song_data[:,:,0]/dictionary_size
             print(song_data.shape)
             data.append(song_data)
 data = np.vstack(data)           

@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import numpy as np
+import sys
+np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize)
 
 if torch.backends.mps.is_available():
     mps_device = torch.device("mps")
@@ -23,13 +26,18 @@ class CustomEmbedding(nn.Module):
         x = x.sum(dim=2).view(batch_size, block_size, -1)  #
         return x
 
-# Example usage
-batch_size = 64
-block_size = 256
-seq_len = 100
-embedding = 100
-model = CustomEmbedding(embedding_size=embedding)
-input_triplets = torch.rand(batch_size, block_size, seq_len, 3)  # Random example data
-embedded = model(input_triplets)
-print(embedded.shape)
-
+# # Example usage
+# batch_size = 64
+# block_size = 256
+# seq_len = 100
+# embedding = 100
+# model = CustomEmbedding(embedding_size=embedding)
+# input_triplets = torch.rand(batch_size, block_size, seq_len, 3)  # Random example data
+# embedded = model(input_triplets)
+# print(embedded.shape)
+a = torch.arange(1*8*12).reshape((1,8,12))
+print(a.cpu().numpy())
+even = a[:,:,::2]
+odd = a[:,:,1::2]
+b = torch.cat((even,odd), dim=2)
+print(b.cpu().numpy())

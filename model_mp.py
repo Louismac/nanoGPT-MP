@@ -134,6 +134,7 @@ class GPTConfig:
     n_embd: int = 768
     num_atoms: int = 100
     num_features: int = 3
+    logit_loss:bool = True
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -175,8 +176,11 @@ class GPT(nn.Module):
         print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd, config.num_features)
         self.transformer = Transformer(config)
         print("done transformer")
-        #This layer is large 
-        self.lm_head = nn.Linear(config.n_embd, config.num_atoms*config.num_features, bias=False)
+        n_output = config.num_atoms*config.num_features
+        if config.logit_loss:
+            n_output = config.vocab_size + (config.num_atoms*2)
+
+        self.lm_head = nn.Linear(config.n_embd, n_output, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -210,10 +214,6 @@ class GPT(nn.Module):
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
     
-
-    #mask out zero padded atoms
-            
-    
     def custom_loss(self, output, target):
         cum_sum = 0
         for n in range(self.config.num_features):
@@ -224,6 +224,7 @@ class GPT(nn.Module):
                 mse_loss_unreduced = F.mse_loss(o, t, reduction='none')  
             else:
                 #phase
+                mask = t == 0.5
                 mse_loss_unreduced = self.circular_loss(o,t)
             mse_loss_masked = mse_loss_unreduced * mask  
             mse_loss = mse_loss_masked.sum() / mask.sum() 
@@ -232,11 +233,11 @@ class GPT(nn.Module):
           
         return cum_sum/self.config.num_features
 
-    #accounts for wrap around of phase
     def circular_loss(self, output, target):
+        #wrap around output (0-2pi has been normalised to 0-1)
         output = torch.remainder(output, 1)
-        target = torch.remainder(target, 1)
-        angle_diff = torch.remainder(output - target + 0.5, 1) - 0.5
+        angle_diff = output - target
+        angle_diff = torch.remainder(angle_diff + 0.5, 1) - 0.5
         loss = torch.mean(angle_diff ** 2)
         return loss
 
@@ -266,12 +267,43 @@ class GPT(nn.Module):
             x = block(x)
         x = self.transformer.ln_f(x)
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
+            #categorical
             out = self.lm_head(x)
-            b,s,f = out.shape
-            out = out.view(b,s,self.config.num_atoms, self.config.num_features)
-            loss = self.custom_loss(out, targets)
-            # print("loss", loss)
+
+            if self.config.logit_loss:
+                split = self.config.vocab_size
+                idx = out[:,:,:split]
+                coef = out[:,:,split:]
+                mags = coef[:,:,:self.config.num_atoms]  
+                phase = coef[:,:,self.config.num_atoms:] 
+                
+                idx_target = targets[:,:,:split]
+                coef_target = targets[:,:,split:]
+                mags_target = coef_target[:,:,:self.config.num_atoms]  
+                phase_target = coef_target[:,:,self.config.num_atoms:] 
+
+                bce_loss = self.bce_loss_func(idx, idx_target)
+                
+                mask = mags_target > 0
+                mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
+                mag_loss = mag_loss * mask  
+                mag_loss = mag_loss.sum() / mask.sum() 
+                
+                mask = phase_target > 0
+                phase_loss = self.circular_loss(phase, phase_target) 
+                phase_loss = phase_loss * mask  
+                phase_loss = phase_loss.sum() / mask.sum() 
+
+                print("phase_loss", phase_loss.cpu().item())
+                print("bce_loss", bce_loss.cpu().item())
+                print("mag_loss", mag_loss.cpu().item())
+
+                loss = bce_loss + mag_loss + phase_loss
+            #all mse
+            else:
+                b,s,f = out.shape
+                out = out.view(b,s,self.config.num_atoms, self.config.num_features)
+                loss = self.custom_loss(out, targets)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             out = self.lm_head(x) # note: using list [-1] to preserve the time dim

@@ -21,8 +21,10 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import sys
 
 import numpy as np
+np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize) 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
@@ -77,6 +79,7 @@ hop_length = chunk_size//4
 sr = 44100
 dictionary_size = 5000
 name = "test"
+logit_loss = True
 from data.matching_pursuit.matching_pursuit import get_run_name
 
 # system
@@ -126,19 +129,23 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-# def get_sparse(y):
-#     #sparse
-#     indices = y[:,:,:config["num_atoms"]].long()
-#     coeff = y[:,:,config["num_atoms"]:]
-#     b, s, a = indices.shape
-#     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
-#     for i in range(a):
-#         #DIM, INDICES, VALUES
-#         sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
-#     sparse.clamp_(max=1)
-#     #ADD IN COEFF
-#     sparse = torch.cat([sparse.float(), coeff], dim=-1)
-#     return sparse
+def get_sparse(y):
+    #sparse
+    #deinterleave
+    y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
+    indices = y[:,:,:config["num_atoms"]].long()
+    coeff = y[:,:,config["num_atoms"]:]
+    # print("coeff", coeff.cpu().numpy())
+    # print("indices", indices.cpu().numpy())
+    b, s, a = indices.shape
+    sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
+    for i in range(a):
+        #DIM, INDICES, VALUES
+        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
+    sparse.clamp_(max=1)
+    #ADD IN COEFF
+    sparse = torch.cat([sparse.float(), coeff], dim=-1)
+    return sparse
 
 # poor man's data loader
 def get_batch(split):
@@ -153,22 +160,34 @@ def get_batch(split):
     num_features = (config["num_atoms"]*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, config["num_atoms"], 3)
+    # print("data", data.shape)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
-    # #drop phase
     x = x[:,:,:,:config["num_features"]]
+
+    #normalise into the range 0-1 (0 - dictionary_size)
+    x[:,:,:,0] /= (config["dictionary_size"])
+    #normalise into the range 0-1 (from -pi - pi)
     x[:,:,:,2] += torch.pi
     x[:,:,:,2] /= (2*torch.pi)
+    
     y = y[:,:,:,:config["num_features"]]
+    #normalise into the range 0-1 (from -pi - pi)
+    y[:,:,:,2] += torch.pi
     y[:,:,:,2] /= (2*torch.pi)
+
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    #y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).toarray().astype(np.float32)) for i in ix]) 
-    
+
+    if config["logit_loss"]:
+        #if doing logit loss
+        y = y.view(y.size(0), y.size(1), -1)
+        y = get_sparse(y)
+
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -187,7 +206,7 @@ if os.path.exists(meta_path):
 # model init
 meta_vocab_size = dictionary_size
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size, num_atoms = num_atoms,
-                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features) 
+                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features, logit_loss=logit_loss) 
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -207,7 +226,7 @@ elif init_from == 'resume':
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', "num_atoms"]:
         model_args[k] = checkpoint_model_args[k]
-    # create the model
+    # create the mo≈del
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
     
