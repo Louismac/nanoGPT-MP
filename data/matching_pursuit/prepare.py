@@ -9,7 +9,8 @@ chunk_size = 2048
 dictionary_size = chunk_size//2
 hop_length = chunk_size//4
 cache_name = get_run_name("taylor", chunk_size, dictionary_size, num_atoms)
-path = "/Users/lmccallum/Documents/nanoGPT-MP/taylor"
+# path = "/Users/lmccallum/Documents/nanoGPT-MP/taylor"
+path = "/home/louis/Documents/notebooks/fastmpwithmultigabor/libltfat/examples/multigabormp/taylor/converted_wavs"
 files = os.listdir(path)
 data = []
 for p in files:
@@ -30,12 +31,9 @@ for p in files:
                     for f in range(n_features):
                         index = (atom*n_features)+f
                         val = atoms[index]
-                        print(atom, f, index, val)
                         frame[atom,f] = val
                 return frame
             song_data = np.array([get_frame(atoms) for atoms in reader])
-            #normalise indexes
-            print(song_data.shape)
             data.append(song_data)
 data = np.vstack(data)           
 

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -179,7 +181,7 @@ class GPT(nn.Module):
         n_output = config.num_atoms*config.num_features
         if config.logit_loss:
             n_output = config.vocab_size + (config.num_atoms*2)
-
+        print("config.logit_loss", config.logit_loss, n_output)
         self.lm_head = nn.Linear(config.n_embd, n_output, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -215,7 +217,7 @@ class GPT(nn.Module):
         return n_params
     
     def custom_mse_loss(self, output, target):
-        cum_sum = 0
+        loss = torch.zeros((self.config.num_features))
         for n in range(self.config.num_features):
             o = output[:,:,:,n]
             t = target[:,:,:,n]
@@ -227,11 +229,9 @@ class GPT(nn.Module):
                 mask = t == 0.5
                 mse_loss_unreduced = self.circular_loss(o,t)
             mse_loss_masked = mse_loss_unreduced * mask  
-            mse_loss = mse_loss_masked.sum() / mask.sum() 
-            print("loss",n, mse_loss.cpu().item())
-            cum_sum += mse_loss
-          
-        return cum_sum
+            mse_loss = mse_loss_masked.sum() / mask.sum()
+            loss[n] = mse_loss
+        return loss
 
     def circular_loss(self, output, target):
         #wrap around output (0-2pi has been normalised to 0-1)
@@ -265,12 +265,10 @@ class GPT(nn.Module):
         phase_loss = phase_loss * mask  
         phase_loss = phase_loss.sum() / mask.sum() 
 
-        print("phase_loss", phase_loss.cpu().item())
-        print("bce_loss", bce_loss.cpu().item())
-        print("mag_loss", mag_loss.cpu().item())
-
-        loss = bce_loss + mag_loss + phase_loss
-        return loss
+        # print("phase_loss", phase_loss.cpu().item())
+        # print("bce_loss", bce_loss.cpu().item())
+        # print("mag_loss", mag_loss.cpu().item())
+        return torch.tensor(bce_loss, mag_lossm, phase_loss)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -436,24 +434,36 @@ class GPT(nn.Module):
             chunks_cond = chunks if chunks.size(1) <= self.config.block_size else chunks[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
             output, _ = self(chunks_cond)
-            
-            split = self.config.vocab_size
-            #just the last in the sequence
-            logits = output[:,-1,:split]/ temperature
-            coef = output[:,-1,split:]
 
+            if self.config.logit_loss:
+                split = self.config.vocab_size
+                #just the last in the sequence
+                logits = output[:,-1,:split]
+                logits/=temperature
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = -float('Inf')
+                probs = F.softmax(logits, dim=-1)
+                idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
+            else:
+                split = self.config.num_atoms
+                #just the last in the sequence
+                indexes = output[:,-1,:split]
+                #rediscretize to index (from 0-1)
+                idx_next = torch.floor(indexes*self.config.vocab_size)
             
-            #optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
+            #unnormalise phase (back to -pi - pi)
+            coef = output[:,-1,split:]
+            coef[:,split:] = (coef[:,split:] * (2*torch.pi)) - torch.pi
+            #this is 1 frame (e.g. 1x300)
             chunk_next = torch.cat((idx_next, coef), axis=1)
-            chunk_next = chunk_next.reshape((chunks.shape[-1])).unsqueeze(0).unsqueeze(0)
+            #We need to make 2d and interleaved for libltfat
+            #Reshape the tensor to 3x100, grouping every 100 elements into separate rows
+            chunk_next = chunk_next.view(self.config.num_features, self.config.num_atoms)
+            #Transpose the tensor to switch rows and columns, achieving the interleaving effect
+            chunk_next = chunk_next.t()
+            chunk_next = chunk_next.unsqueeze(0).unsqueeze(0)
             # append sampled index to the running sequence and continue
             chunks = torch.cat((chunks, chunk_next), dim=1)
 
-        return chunks
+        return chunks.view(chunks.shape[0],chunks.shape[1],-1)

@@ -32,6 +32,7 @@ from torch.distributed import init_process_group, destroy_process_group
 # torch._dynamo.config.suppress_errors = True
 from model_mp import GPTConfig, GPT
 from torchsummary import summary
+
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -83,7 +84,7 @@ logit_loss = True
 from data.matching_pursuit.matching_pursuit import get_run_name
 
 # system
-device = 'mps' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -184,9 +185,13 @@ def get_batch(split):
         x, y = x.to(device), y.to(device)
 
     if config["logit_loss"]:
-        #if doing logit loss
+        #flatten [100x3 into 300]
         y = y.view(y.size(0), y.size(1), -1)
+        #get sparse + end to end mags and phases
         y = get_sparse(y)
+    else:
+        #normalise into the range 0-1 (0 - dictionary_size)
+        y[:,:,:,0] /= (config["dictionary_size"])
 
     return x, y
 
@@ -283,7 +288,8 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, split_loss = model(X, Y)
+                loss = split_loss.sum()
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -363,7 +369,8 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, split_loss = model(X, Y)
+            loss = split_loss.sum()
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
@@ -386,11 +393,8 @@ while True:
     if iter_num % log_interval == 0 and master_process:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = loss.item() * gradient_accumulation_steps
-        if local_iter_num >= 5: # let the training loop settle a bit
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        lossf = split_loss * gradient_accumulation_steps
+        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, phase_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 

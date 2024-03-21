@@ -8,6 +8,8 @@ import torch
 import tiktoken
 from model_mp import GPTConfig, GPT
 import numpy as np
+import sys
+np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize) 
 from data.matching_pursuit.matching_pursuit import get_run_name, get_dictionary
 from data.matching_pursuit.matching_pursuit import reconstruct_from_embedding_chunks
 from datetime import datetime
@@ -17,7 +19,7 @@ import soundfile as sf
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 10 # number of samples to draw
+num_samples = 1 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -33,6 +35,8 @@ dictionary_size = 10000
 dataset = 'matching_pursuit'
 batch_size = 64
 block_size = 256 
+logit_loss = False
+num_features = 3
 
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
@@ -56,8 +60,12 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 def get_sparse(y):
     #sparse
+    #deinterleave
+    y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
     indices = y[:,:,:config["num_atoms"]].long()
     coeff = y[:,:,config["num_atoms"]:]
+    # print("coeff", coeff.cpu().numpy())
+    # print("indices", indices.cpu().numpy())
     b, s, a = indices.shape
     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
     for i in range(a):
@@ -79,27 +87,51 @@ def get_batch(split):
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
         # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
     num_features = (config["num_atoms"]*3)
-    data = data.reshape(len(data)//num_features, num_features)
+    # print("num_frames", len(data)//num_features)
+    data = data.reshape((len(data)//num_features, config["num_atoms"], 3))
+    # print("data", data.shape)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
+    x = x[:,:,:,:config["num_features"]]
+
+    #normalise into the range 0-1 (0 - dictionary_size)
+    # print(x[:,:,:,0].cpu().numpy())
+    x[:,:,:,0] /= (config["dictionary_size"])
+    #normalise into the range 0-1 (from -pi - pi)
+    x[:,:,:,2] += torch.pi
+    x[:,:,:,2] /= (2*torch.pi)
+    
+    y = y[:,:,:,:config["num_features"]]
+    #normalise into the range 0-1 (from -pi - pi)
+    y[:,:,:,2] += torch.pi
+    y[:,:,:,2] /= (2*torch.pi)
+
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    #y = torch.stack([torch.from_numpy((sparse[i+1:i+1+block_size]).toarray().astype(np.float32)) for i in ix]) 
-    y = get_sparse(y)
-    
+
+    if config["logit_loss"]:
+        #if doing logit loss
+        y = y.view(y.size(0), y.size(1), -1)
+        y = get_sparse(y)
+    else:
+        y[:,:,:,0] /= (config["dictionary_size"])
+    # print("x",x.cpu().numpy())
+    # print("y",y.cpu().numpy())
     return x, y
 
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    ckpt_path = os.path.join(out_dir, 'ckpt-phase-taylor.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
+    gptconf.logit_loss = logit_loss 
+    gptconf.num_features = num_features 
     model = GPT(gptconf)
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
@@ -144,6 +176,7 @@ print("x[0]", x[0].shape)
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
+            # print(x[0].cpu().numpy())
             y = model.generate(x[0].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
             print(y.shape)
