@@ -126,7 +126,7 @@ def get_batch(split):
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt-phase-taylor.pt')
+    ckpt_path = os.path.join(out_dir, 'ckpt_taylor_all_mse.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])

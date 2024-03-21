@@ -14,8 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter()
+
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -137,6 +136,7 @@ class GPTConfig:
     num_atoms: int = 100
     num_features: int = 3
     logit_loss:bool = True
+    conv_input:bool = False
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -144,7 +144,10 @@ class Transformer(nn.Module):
     def __init__(self, config):
         super().__init__()
         print("vocab_size", config.vocab_size,"n_embd", config.n_embd)
-        self.wte = CustomEmbedding(config.num_features, config.n_embd)
+        if config.conv_input:
+            self.wte = CustomEmbedding(config.num_features, config.n_embd)
+        else:
+            self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         print("block_size", config.block_size,"n_embd", config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.drop = MPSDropout(config.dropout)
@@ -265,10 +268,7 @@ class GPT(nn.Module):
         phase_loss = phase_loss * mask  
         phase_loss = phase_loss.sum() / mask.sum() 
 
-        # print("phase_loss", phase_loss.cpu().item())
-        # print("bce_loss", bce_loss.cpu().item())
-        # print("mag_loss", mag_loss.cpu().item())
-        return torch.tensor(bce_loss, mag_lossm, phase_loss)
+        return torch.stack((bce_loss, mag_loss, phase_loss))
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -280,11 +280,21 @@ class GPT(nn.Module):
 
     def forward(self, inputs, targets=None):
         device = inputs.device 
-        b, t, na, f = inputs.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(inputs) # token embeddings of shape (b, t, n_embd)
+        if self.config.conv_input:
+            b, t, na, f = inputs.size()
+            pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
+            # forward the GPT model itself
+            tok_emb = self.transformer.wte(inputs) # token embeddings of shape (b, t, n_embd)
+        else:
+            idx = inputs[:,:,:self.config.num_atoms].long()
+            coef = inputs[:,:,self.config.num_atoms:]
+            mag = coef[:,:,:self.config.num_atoms]
+            b, t, f = idx.size()
+            pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
+            idx = torch.clamp(idx, min=0, max=9999)
+            tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
+            weighted_tok_emb = tok_emb *  mag.unsqueeze(-1)
+            tok_emb = torch.sum(weighted_tok_emb, dim=2)
         #this embeds the position in the block
         pos_emb = self.transformer.wpe(pos).squeeze(1) 
         #Expand to match the batch dimension 
@@ -445,6 +455,7 @@ class GPT(nn.Module):
                     logits[logits < v[:, [-1]]] = -float('Inf')
                 probs = F.softmax(logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
+                idx_next, _ = torch.sort(idx_next)
             else:
                 split = self.config.num_atoms
                 #just the last in the sequence
@@ -462,6 +473,7 @@ class GPT(nn.Module):
             chunk_next = chunk_next.view(self.config.num_features, self.config.num_atoms)
             #Transpose the tensor to switch rows and columns, achieving the interleaving effect
             chunk_next = chunk_next.t()
+            # print(chunk_next[:,0].cpu().numpy())
             chunk_next = chunk_next.unsqueeze(0).unsqueeze(0)
             # append sampled index to the running sequence and continue
             chunks = torch.cat((chunks, chunk_next), dim=1)

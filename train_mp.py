@@ -32,6 +32,8 @@ from torch.distributed import init_process_group, destroy_process_group
 # torch._dynamo.config.suppress_errors = True
 from model_mp import GPTConfig, GPT
 from torchsummary import summary
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -81,6 +83,7 @@ sr = 44100
 dictionary_size = 5000
 name = "test"
 logit_loss = True
+conv_input = False
 from data.matching_pursuit.matching_pursuit import get_run_name
 
 # system
@@ -136,13 +139,13 @@ def get_sparse(y):
     y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
     indices = y[:,:,:config["num_atoms"]].long()
     coeff = y[:,:,config["num_atoms"]:]
-    # print("coeff", coeff.cpu().numpy())
-    # print("indices", indices.cpu().numpy())
     b, s, a = indices.shape
     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
     for i in range(a):
         #DIM, INDICES, VALUES
         sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
+    # print("indices", indices.cpu().numpy())
+    # print("sparse", sparse.cpu().numpy())
     sparse.clamp_(max=1)
     #ADD IN COEFF
     sparse = torch.cat([sparse.float(), coeff], dim=-1)
@@ -154,10 +157,8 @@ def get_batch(split):
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
         data = np.memmap(os.path.join(cache_path, 'train.bin'), dtype=np.float32, mode='r')
-        # sparse = load_npz(os.path.join(cache_path, 'train_y.bin.npz'))
     else:
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
-        # sparse = load_npz(os.path.join(cache_path, 'val_y.bin.npz'))
     num_features = (config["num_atoms"]*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, config["num_atoms"], 3)
@@ -165,14 +166,20 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
+    
     x = x[:,:,:,:config["num_features"]]
-
-    #normalise into the range 0-1 (0 - dictionary_size)
-    x[:,:,:,0] /= (config["dictionary_size"])
-    #normalise into the range 0-1 (from -pi - pi)
+     #normalise into the range 0-1 (from -pi - pi)
     x[:,:,:,2] += torch.pi
     x[:,:,:,2] /= (2*torch.pi)
-    
+    if config["conv_input"]:
+        #normalise into the range 0-1 (0 - dictionary_size)
+        x[:,:,:,0] /= (config["dictionary_size"])
+    else :
+        #flatten [100x3 into 300]
+        x = x.view(x.size(0), x.size(1), -1)
+        #deinterleave
+        x = torch.cat((x[:,:,::3], x[:,:,1::3],x[:,:,2::3]), dim=2)
+
     y = y[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
     y[:,:,:,2] += torch.pi
@@ -211,7 +218,7 @@ if os.path.exists(meta_path):
 # model init
 meta_vocab_size = dictionary_size
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size, num_atoms = num_atoms,
-                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features, logit_loss=logit_loss) 
+                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features, logit_loss=logit_loss, conv_input = conv_input) 
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -317,7 +324,7 @@ if wandb_log and master_process:
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
 print("summary", X.shape)
-# summary(model, input_size=X.shape)
+summary(model, input_size=X.shape)
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -394,6 +401,9 @@ while True:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = split_loss * gradient_accumulation_steps
+        writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
+        writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
+        writer.add_scalar("phase_loss x step", lossf[2].item(), iter_num)
         print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, phase_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
@@ -404,3 +414,5 @@ while True:
 
 if ddp:
     destroy_process_group()
+
+writer.close()
