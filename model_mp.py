@@ -214,7 +214,7 @@ class GPT(nn.Module):
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
     
-    def custom_loss(self, output, target):
+    def custom_mse_loss(self, output, target):
         cum_sum = 0
         for n in range(self.config.num_features):
             o = output[:,:,:,n]
@@ -231,7 +231,7 @@ class GPT(nn.Module):
             print("loss",n, mse_loss.cpu().item())
             cum_sum += mse_loss
           
-        return cum_sum/self.config.num_features
+        return cum_sum
 
     def circular_loss(self, output, target):
         #wrap around output (0-2pi has been normalised to 0-1)
@@ -239,6 +239,37 @@ class GPT(nn.Module):
         angle_diff = output - target
         angle_diff = torch.remainder(angle_diff + 0.5, 1) - 0.5
         loss = torch.mean(angle_diff ** 2)
+        return loss
+    
+    def logit_loss(self, out, targets):
+        split = self.config.vocab_size
+        idx = out[:,:,:split]
+        coef = out[:,:,split:]
+        mags = coef[:,:,:self.config.num_atoms]  
+        phase = coef[:,:,self.config.num_atoms:] 
+        
+        idx_target = targets[:,:,:split]
+        coef_target = targets[:,:,split:]
+        mags_target = coef_target[:,:,:self.config.num_atoms]  
+        phase_target = coef_target[:,:,self.config.num_atoms:] 
+
+        bce_loss = self.bce_loss_func(idx, idx_target)
+        
+        mask = mags_target > 0
+        mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
+        mag_loss = mag_loss * mask  
+        mag_loss = mag_loss.sum() / mask.sum() 
+        
+        mask = phase_target > 0.5
+        phase_loss = self.circular_loss(phase, phase_target) 
+        phase_loss = phase_loss * mask  
+        phase_loss = phase_loss.sum() / mask.sum() 
+
+        print("phase_loss", phase_loss.cpu().item())
+        print("bce_loss", bce_loss.cpu().item())
+        print("mag_loss", mag_loss.cpu().item())
+
+        loss = bce_loss + mag_loss + phase_loss
         return loss
 
     def _init_weights(self, module):
@@ -271,39 +302,12 @@ class GPT(nn.Module):
             out = self.lm_head(x)
 
             if self.config.logit_loss:
-                split = self.config.vocab_size
-                idx = out[:,:,:split]
-                coef = out[:,:,split:]
-                mags = coef[:,:,:self.config.num_atoms]  
-                phase = coef[:,:,self.config.num_atoms:] 
-                
-                idx_target = targets[:,:,:split]
-                coef_target = targets[:,:,split:]
-                mags_target = coef_target[:,:,:self.config.num_atoms]  
-                phase_target = coef_target[:,:,self.config.num_atoms:] 
-
-                bce_loss = self.bce_loss_func(idx, idx_target)
-                
-                mask = mags_target > 0
-                mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
-                mag_loss = mag_loss * mask  
-                mag_loss = mag_loss.sum() / mask.sum() 
-                
-                mask = phase_target > 0
-                phase_loss = self.circular_loss(phase, phase_target) 
-                phase_loss = phase_loss * mask  
-                phase_loss = phase_loss.sum() / mask.sum() 
-
-                print("phase_loss", phase_loss.cpu().item())
-                print("bce_loss", bce_loss.cpu().item())
-                print("mag_loss", mag_loss.cpu().item())
-
-                loss = bce_loss + mag_loss + phase_loss
+                loss = self.logit_loss(out, targets)
             #all mse
             else:
                 b,s,f = out.shape
                 out = out.view(b,s,self.config.num_atoms, self.config.num_features)
-                loss = self.custom_loss(out, targets)
+                loss = self.custom_mse_loss(out, targets)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             out = self.lm_head(x) # note: using list [-1] to preserve the time dim
