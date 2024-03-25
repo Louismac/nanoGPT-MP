@@ -245,17 +245,17 @@ class GPT(nn.Module):
         loss = torch.mean(angle_diff ** 2)
         return loss
     
-    #JUST LOSS ON FINAL TOKEN IN BLOCK
+    #JUST LOSS ON FINAL TOKEN IN BLOCK?
     def logit_loss(self, out, targets):
         split = self.config.vocab_size
-        idx = out[:,-1,:split]
+        idx = out[:,:,:split]
         coef = out[:,:,split:]
-        mags = coef[:,-1,:self.config.num_atoms]  
+        mags = coef[:,:,:self.config.num_atoms]  
         phase = coef[:,:,self.config.num_atoms:] 
         
-        idx_target = targets[:,-1,:split]
+        idx_target = targets[:,:,:split]
         coef_target = targets[:,:,split:]
-        mags_target = coef_target[:,-1,:self.config.num_atoms]  
+        mags_target = coef_target[:,:,:self.config.num_atoms]  
         phase_target = coef_target[:,:,self.config.num_atoms:] 
 
         bce_loss = self.bce_loss_func(idx, idx_target)
@@ -481,7 +481,7 @@ class GPT(nn.Module):
                 chunk_next = output[:,-1].unsqueeze(0)
                 if not self.config.conv_input:
                     #need to make end to end
-                    chunk_next = torch.cat((chunk_next[:,:,:,0], chunk_next[:,:,:,1],chunk_next[:,:,:,3]), dim=2)
+                    chunk_next = torch.cat((chunk_next[:,:,:,0], chunk_next[:,:,:,1],chunk_next[:,:,:,2]), dim=2)
                     #need to unnormalise for embed input on next pass
                     chunk_next[:,:,::3] = torch.floor(chunk_next[:,:,::3]*self.config.vocab_size)
             

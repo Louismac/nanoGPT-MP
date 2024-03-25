@@ -97,7 +97,10 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
 cache_path = os.path.join("data", dataset, cache_path)
-
+from datetime import datetime
+timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
+checkpoint_path = os.path.join(cache_path, timestampStr)
+os.mkdir(checkpoint_path)
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -363,7 +366,10 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                # Save metadata to a file
+                with open(os.path.join(checkpoint_path, 'training_metadata.pkl'), 'wb') as f:
+                    pickle.dump(config, f)
+                torch.save(checkpoint, os.path.join(checkpoint_path, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -378,8 +384,8 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, split_loss = model(X, Y)
-            #loss = split_loss.sum()
-            loss = split_loss[0] + split_loss[1]
+            loss = split_loss.sum()
+            # loss = split_loss[0] + split_loss[1]
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

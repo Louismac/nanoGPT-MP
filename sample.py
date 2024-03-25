@@ -22,7 +22,7 @@ start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE
 num_samples = 3 # number of samples to draw
 max_new_tokens = 1000 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 900 # retain only the top_k most likely tokens, clamp others to have 0 probability
+top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 
 num_atoms = 100
@@ -59,24 +59,6 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-def get_sparse(y):
-    #sparse
-    #deinterleave
-    y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
-    indices = y[:,:,:config["num_atoms"]].long()
-    coeff = y[:,:,config["num_atoms"]:]
-    b, s, a = indices.shape
-    sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
-    for i in range(a):
-        #DIM, INDICES, VALUES
-        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
-    # print("indices", indices.cpu().numpy())
-    # print("sparse", sparse.cpu().numpy())
-    sparse.clamp_(max=1)
-    #ADD IN COEFF
-    sparse = torch.cat([sparse.float(), coeff], dim=-1)
-    return sparse
-
 # poor man's data loader
 def get_batch(split):
     # We recreate np.memmap every batch to avoid a memory leak, as per
@@ -87,20 +69,16 @@ def get_batch(split):
         data = np.memmap(os.path.join(cache_path, 'val.bin'), dtype=np.float32, mode='r')
     saved_atoms = 100
     num_features = (saved_atoms*3)
-    # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
     data = data[:,:config["num_atoms"],:]
-    # print("data", data.shape)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        x = x.pin_memory().to(device, non_blocking=True)
     else:
-        x, y = x.to(device), y.to(device)
+        x = x.to(device)
    
-    x = x[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
     x[:,:,:,2] += torch.pi
     x[:,:,:,2] /= (2*torch.pi)
@@ -113,27 +91,15 @@ def get_batch(split):
         #deinterleave
         x = torch.cat((x[:,:,::3], x[:,:,1::3],x[:,:,2::3]), dim=2)
 
-    y = y[:,:,:,:config["num_features"]]
-    #normalise into the range 0-1 (from -pi - pi)
-    y[:,:,:,2] += torch.pi
-    y[:,:,:,2] /= (2*torch.pi)
-
-    if config["logit_loss"]:
-        #flatten [100x3 into 300]
-        y = y.view(y.size(0), y.size(1), -1)
-        #get sparse + end to end mags and phases
-        y = get_sparse(y)
-    else:
-        #normalise into the range 0-1 (0 - dictionary_size)
-        y[:,:,:,0] /= (config["dictionary_size"])
-
-    return x, y
+    return x
 
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
+    cache_path = os.path.join("data", dataset, cache_path)
+    checkpoint_path = os.path.join(cache_path, "25-Mar-2024-17-50-50/ckpt.pt")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
     gptconf.logit_loss = logit_loss 
@@ -177,14 +143,16 @@ else:
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
 
-x,y = get_batch("train")
+
+x = get_batch("train")
 print("x[0]", x[0].shape)
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             pick = np.random.randint(len(x))
-            y = model.generate(x[pick].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
+            input = x[pick]
+            y = model.generate(input.unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
             #trim off seed
             # y = y[config["block_size"]:]
@@ -211,5 +179,5 @@ with torch.no_grad():
             #unnormalise phase
             y[:,2::3] = (y[:,2::3]*(2*torch.pi))-torch.pi
             #we get indexes and mags and phases, libltfat wants sparse complex coefficients 
-            np.savetxt("output" + str(k) + ".csv", y.cpu().numpy(), delimiter=',',fmt='%.5f')
+            np.savetxt("output" + str(k) + ".csv", y.cpu().numpy(), delimiter=',',fmt='%.6f')
             

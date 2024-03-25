@@ -11,11 +11,11 @@ wandb_project = 'mp'
 wandb_run_name = 'mini-gpt'
 
 #mp stuff 
-logit_loss = True
-conv_input = True
+logit_loss = False
+conv_input = False
 num_atoms = 20
 num_features = 3
-name = "taylor_vocals"
+name = "cello"
 chunk_size = 2048
 hop_length = chunk_size//4
 sr = 44100
@@ -27,9 +27,9 @@ batch_size = 64
 block_size = 256 # context of up to 256 previous characters
 
 # baby GPT model :)
-n_layer = 12
-n_head = 12
-n_embd = 300
+n_layer = 6
+n_head = 6
+n_embd = 60
 dropout = 0.2
 
 learning_rate = 1e-3 # with baby networks can afford to go a bit higher

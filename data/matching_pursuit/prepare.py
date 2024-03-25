@@ -8,9 +8,10 @@ num_atoms = 100
 chunk_size = 2048
 dictionary_size = chunk_size//2
 hop_length = chunk_size//4
-cache_name = get_run_name("taylor_vocals", chunk_size, dictionary_size, num_atoms)
+cache_name = get_run_name("cello", chunk_size, dictionary_size, num_atoms)
 # path = "/Users/lmccallum/Documents/nanoGPT-MP/taylor"
-path = "taylor_vocals/"
+# path = "test/"
+path = "/home/louis/Documents/datasets/cello"
 files = os.listdir(path)
 data = []
 for p in files:
@@ -21,8 +22,6 @@ for p in files:
             reader = csv.reader(f)
             n_features = 3
             def get_frame(atoms):
-                #drop frame number
-                atoms = np.array(atoms)[1:]
                 frame = np.zeros((num_atoms, n_features))
                 max_count = len(atoms)//n_features
                 if max_count > num_atoms:
@@ -36,12 +35,10 @@ for p in files:
             #filter out mostly silence frames
             min_atoms = 5
             song_data = np.array([get_frame(atoms) for atoms in reader if (len(atoms)-1)//n_features>min_atoms])
-            reader = csv.reader(f)
-            print(song_data.shape, sum([1 for row in reader]))
             data.append(song_data)
-        with open(p, 'r') as f:
-            reader = csv.reader(f)
-            print(song_data.shape, sum([1 for row in reader]))
+        # with open(p, 'r') as f:
+        #     reader = csv.reader(f)
+        #     print(song_data.shape, sum([1 for row in reader]))
 data = np.vstack(data)           
 
 # create the train and test splits
