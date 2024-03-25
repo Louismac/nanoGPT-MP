@@ -20,9 +20,9 @@ init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g.
 out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 3 # number of samples to draw
-max_new_tokens = 500 # number of tokens generated in each sample
+max_new_tokens = 1000 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+top_k = 900 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 
 num_atoms = 100
@@ -102,11 +102,11 @@ def get_batch(split):
    
     x = x[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
-    x[:,:,:,2::3] += torch.pi
-    x[:,:,:,2::3] /= (2*torch.pi)
+    x[:,:,:,2] += torch.pi
+    x[:,:,:,2] /= (2*torch.pi)
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
-        x[:,:,:,::3] /= (config["dictionary_size"])
+        x[:,:,:,0] /= (config["dictionary_size"])
     else :
         #flatten [100x3 into 300]
         x = x.view(x.size(0), x.size(1), -1)
@@ -115,8 +115,8 @@ def get_batch(split):
 
     y = y[:,:,:,:config["num_features"]]
     #normalise into the range 0-1 (from -pi - pi)
-    y[:,:,:,2::3] += torch.pi
-    y[:,:,:,2::3] /= (2*torch.pi)
+    y[:,:,:,2] += torch.pi
+    y[:,:,:,2] /= (2*torch.pi)
 
     if config["logit_loss"]:
         #flatten [100x3 into 300]
@@ -132,7 +132,7 @@ def get_batch(split):
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt_conv_input_mse_loss_2.pt')
+    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
@@ -187,8 +187,7 @@ with torch.no_grad():
             y = model.generate(x[pick].unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
             #trim off seed
-            y = y[config["block_size"]:]
-            print(y.shape)
+            # y = y[config["block_size"]:]
             if not config["conv_input"]:
                 #embed input 
                 # full indexes + mags + phases end to end 

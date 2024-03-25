@@ -185,6 +185,7 @@ class GPT(nn.Module):
         if config.logit_loss:
             n_output = config.vocab_size + (config.num_atoms*2)
         print("config.logit_loss", config.logit_loss, n_output)
+        n_output = config.vocab_size
         self.lm_head = nn.Linear(config.n_embd, n_output, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -244,16 +245,17 @@ class GPT(nn.Module):
         loss = torch.mean(angle_diff ** 2)
         return loss
     
+    #JUST LOSS ON FINAL TOKEN IN BLOCK
     def logit_loss(self, out, targets):
         split = self.config.vocab_size
-        idx = out[:,:,:split]
+        idx = out[:,-1,:split]
         coef = out[:,:,split:]
-        mags = coef[:,:,:self.config.num_atoms]  
+        mags = coef[:,-1,:self.config.num_atoms]  
         phase = coef[:,:,self.config.num_atoms:] 
         
-        idx_target = targets[:,:,:split]
+        idx_target = targets[:,-1,:split]
         coef_target = targets[:,:,split:]
-        mags_target = coef_target[:,:,:self.config.num_atoms]  
+        mags_target = coef_target[:,-1,:self.config.num_atoms]  
         phase_target = coef_target[:,:,self.config.num_atoms:] 
 
         bce_loss = self.bce_loss_func(idx, idx_target)
@@ -289,7 +291,6 @@ class GPT(nn.Module):
             coef = inputs[:,:,self.config.num_atoms:]
             mag = coef[:,:,:self.config.num_atoms]
             b, t, f = idx.size()
-            idx = torch.clamp(idx, min=0, max=9999)
             tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
             weighted_tok_emb = tok_emb *  mag.unsqueeze(-1)
             tok_emb = torch.sum(weighted_tok_emb, dim=2)
@@ -310,15 +311,23 @@ class GPT(nn.Module):
         out = self.lm_head(x)
 
         if self.config.logit_loss:
-            #relu the coeffiecents
-            out[:,:,self.config.vocab_size:] = F.sigmoid(out[:,:,self.config.vocab_size:])
+            # #sig the coeffiecents
+            # out[:,:,self.config.vocab_size:] = F.sigmoid(out[:,:,self.config.vocab_size:])
+            # if targets is not None:
+            #     loss = self.logit_loss(out, targets)
+            out = F.sigmoid(out)
             if targets is not None:
-                loss = self.logit_loss(out, targets)
+                # print(targets[:,:,:self.config.vocab_size].cpu().numpy())
+                mags_target = targets[:,:,:self.config.vocab_size]
+                mask = mags_target > 0
+                mag_loss = F.mse_loss(out, mags_target, reduction="none") 
+                mag_loss = mag_loss * mask  
+                mag_loss = mag_loss.sum() / mask.sum() 
+                loss = mag_loss
         #all mse
         else:
             b,s,f = out.shape
-            out = out.view(b,s,self.config.num_atoms, self.config.num_features)
-            #relu everything!
+            #sig everything!
             out = F.sigmoid(out)
             if targets is not None:
                 loss = self.custom_mse_loss(out, targets)
@@ -443,9 +452,9 @@ class GPT(nn.Module):
         """
         for i in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            chunks_cond = chunks if chunks.size(1) <= self.config.block_size else chunks[:, -self.config.block_size:]
+            chunks_cond = chunks[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            # print("chunks",chunks_cond.shape)
+            # print("chunk cond end",chunks_cond[:,-1][0,:5,:].cpu().numpy())
             output, _ = self(chunks_cond)
             # print("output",output.cpu().numpy())
             if self.config.logit_loss:
@@ -454,7 +463,7 @@ class GPT(nn.Module):
                 split = self.config.vocab_size
                 #just the last in the sequence
                 logits = output[:,-1,:split]
-                logits/=temperature
+                logits /= temperature
                 if top_k is not None:
                     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                     logits[logits < v[:, [-1]]] = -float('Inf')
@@ -465,26 +474,28 @@ class GPT(nn.Module):
                 chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
                 # print("chunk_next",chunk_next.shape)
                 if self.config.conv_input:
-                    #normalise indices
-                    chunk_next[:,:,::3] /= self.config.vocab_size
+                    #normalise indices (end to end so first num_atoms)
+                    chunk_next[:,:,:self.config.num_atoms] /= self.config.vocab_size
                     #Turn to 2d for conv input on next pass
                     chunk_next = chunk_next.view(3, self.config.num_atoms)
                     chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
             else:
                 #mse loss
-                #comes out as normalised indexes + mags + phases (end to end)
-                split = self.config.num_atoms
+                #comes out as normalised indexes + mags and phases in 2d shape (nx3)
+                #this is already correct for conv input
                 #just the last in the sequence
-                chunk_next = output[:,-1,:].unsqueeze(0)
-                if self.config.conv_input:
-                    #Turn to 2d for conv input on next pass
-                    chunk_next = chunk_next.view(3, self.config.num_atoms)
-                    chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
-                else:
+                chunk_next = output[:,-1].unsqueeze(0)
+                if not self.config.conv_input:
+                    #need to make end to end
+                    chunk_next = torch.cat((chunk_next[:,:,:,0], chunk_next[:,:,:,1],chunk_next[:,:,:,3]), dim=2)
                     #need to unnormalise for embed input on next pass
                     chunk_next[:,:,::3] = torch.floor(chunk_next[:,:,::3]*self.config.vocab_size)
             
+            # print("chunk_next",chunk_next[0,0,:5,:].cpu().numpy())
             # print("chunk_next",chunk_next.shape)
+            # print("chunks",chunks.shape)
+            # chunk_next torch.Size([1, 1, 50, 3])
+            # chunks torch.Size([1, 256, 50, 3])
             chunks = torch.cat((chunks, chunk_next), dim=1)
         
         return chunks

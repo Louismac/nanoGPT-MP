@@ -33,8 +33,15 @@ for p in files:
                         val = atoms[index]
                         frame[atom,f] = val
                 return frame
-            song_data = np.array([get_frame(atoms) for atoms in reader])
+            #filter out mostly silence frames
+            min_atoms = 5
+            song_data = np.array([get_frame(atoms) for atoms in reader if (len(atoms)-1)//n_features>min_atoms])
+            reader = csv.reader(f)
+            print(song_data.shape, sum([1 for row in reader]))
             data.append(song_data)
+        with open(p, 'r') as f:
+            reader = csv.reader(f)
+            print(song_data.shape, sum([1 for row in reader]))
 data = np.vstack(data)           
 
 # create the train and test splits

@@ -35,7 +35,9 @@ class CustomEmbedding(nn.Module):
 # input_triplets = torch.rand(batch_size, block_size, seq_len, 3)  # Random example data
 # embedded = model(input_triplets)
 # print(embedded.shape)
-a = torch.arange(1*8*12).reshape((1,8,12))
+a = torch.arange(1*1*50*3).reshape(torch.Size([1, 1, 50, 3]))
 print(a.cpu().numpy())
-a[:,:,2::3] *= 10
+a = a.view(3, 50)
+a = a.t().unsqueeze(0).unsqueeze(0)
+# a[:,:,2::3] *= 10
 print(a.cpu().numpy())
