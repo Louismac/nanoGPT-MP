@@ -141,11 +141,9 @@ def get_sparse(y):
     coeff = y[:,:,config["num_atoms"]:]
     b, s, a = indices.shape
     sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
-    #mag instead of ones
-    mag = coeff[:,:,:config["num_atoms"]]
     for i in range(a):
         #DIM, INDICES, VALUES
-        sparse.scatter_add_(2, indices[:, :, i:i+1], mag[:, :, i:i+1])
+        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
     # print("indices", indices.cpu().numpy())
     # print("sparse", sparse.cpu().numpy())
     sparse.clamp_(max=1)
@@ -380,8 +378,8 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, split_loss = model(X, Y)
-            loss = split_loss
-            # loss = split_loss[0] + split_loss[1]
+            #loss = split_loss.sum()
+            loss = split_loss[0] + split_loss[1]
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
@@ -405,11 +403,10 @@ while True:
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = split_loss * gradient_accumulation_steps
-        # writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
-        # writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
-        # writer.add_scalar("phase_loss x step", lossf[2].item(), iter_num)
-        # print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, phase_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
-        print(f"iter {iter_num}: loss {lossf.item():.4f}, time {dt*1000:.2f}ms")
+        writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
+        writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
+        writer.add_scalar("phase_loss x step", lossf[2].item(), iter_num)
+        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, phase_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 

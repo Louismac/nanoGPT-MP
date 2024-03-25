@@ -185,7 +185,7 @@ class GPT(nn.Module):
         if config.logit_loss:
             n_output = config.vocab_size + (config.num_atoms*2)
         print("config.logit_loss", config.logit_loss, n_output)
-        n_output = config.vocab_size
+        
         self.lm_head = nn.Linear(config.n_embd, n_output, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -311,25 +311,19 @@ class GPT(nn.Module):
         out = self.lm_head(x)
 
         if self.config.logit_loss:
-            # #sig the coeffiecents
-            # out[:,:,self.config.vocab_size:] = F.sigmoid(out[:,:,self.config.vocab_size:])
-            # if targets is not None:
-            #     loss = self.logit_loss(out, targets)
-            out = F.sigmoid(out)
+            #sig the coeffiecents
+            out[:,:,self.config.vocab_size:] = F.sigmoid(out[:,:,self.config.vocab_size:])
             if targets is not None:
-                # print(targets[:,:,:self.config.vocab_size].cpu().numpy())
-                mags_target = targets[:,:,:self.config.vocab_size]
-                mask = mags_target > 0
-                mag_loss = F.mse_loss(out, mags_target, reduction="none") 
-                mag_loss = mag_loss * mask  
-                mag_loss = mag_loss.sum() / mask.sum() 
-                loss = mag_loss
+                # loss = self.logit_loss(out[:,-1,:].unsqueeze(1), targets[:,-1,:].unsqueeze(1))
+                loss = self.logit_loss(out, targets)
         #all mse
         else:
             b,s,f = out.shape
+            out = out.view(b,s,self.config.num_atoms, self.config.num_features)
             #sig everything!
             out = F.sigmoid(out)
             if targets is not None:
+                # loss = self.custom_mse_loss(out[:,-1,:,:].unsqueeze(1), targets[:,-1,:,:].unsqueeze(1))
                 loss = self.custom_mse_loss(out, targets)
 
         return out, loss
