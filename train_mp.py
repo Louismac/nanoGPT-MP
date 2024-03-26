@@ -51,6 +51,7 @@ wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'matching_pursuit'
+curric_steps = 4
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 1024
@@ -170,7 +171,7 @@ def get_batch(split):
     # print("data", data.shape)
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
+    y = torch.stack([torch.from_numpy((data[i+block_size:i+block_size+config["curric_steps"]]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -295,13 +296,13 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
-        print("estimate_loss", eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            with ctx:
-                logits, split_loss = model(X, Y)
-                loss = split_loss.sum()
-            losses[k] = loss.item()
+        # print("estimate_loss", eval_iters)
+        # for k in range(eval_iters):
+        #     X, Y = get_batch(split)
+        #     with ctx:
+        #         logits, split_loss = model(X, Y)
+        #         loss = split_loss.sum()
+        #     losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
@@ -383,23 +384,34 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, split_loss = model(X, Y)
-            loss = split_loss.sum()
-            # loss = split_loss[0] + split_loss[1]
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            curric_iters = 200
+            steps = 1 if iter_num < curric_iters else config["curric_steps"]
+            for i in range(steps):
+                input_block = X[:,-config["block_size"]:]
+                input_target = Y[:,i].unsqueeze(1)
+                output, split_loss = model(input_block, input_target)
+                # loss = split_loss.sum()
+                loss = split_loss[0] + split_loss[1]
+                # loss += (loss / config["curric_steps"]) # scale the loss to account for gradient accumulation
+                
+                if iter_num < curric_iters:
+                    model.eval()
+                    chunk_next = model.get_one_token(output)
+                    X = torch.cat((X, chunk_next), dim=1)
+
+                model.train()
+                scaler.scale(loss).backward()
+                if grad_clip != 0.0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+    
+    
 
     # timing and logging
     t1 = time.time()

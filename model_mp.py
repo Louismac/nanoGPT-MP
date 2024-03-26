@@ -119,7 +119,7 @@ class CustomEmbedding(nn.Module):
         # x shape: (batch_size, block_size, num_atoms, num_features)
         # Reshape x to: (batch_size*block_size, num_features, num_atoms) for Conv1d
         batch_size, block_size, num_atoms, features = x.size()
-        x = x.view(batch_size * block_size, features, num_atoms)  # Combine batch and block for batched processing
+        x = x.reshape(batch_size * block_size, features, num_atoms)  # Combine batch and block for batched processing
         #kernel is same size as features, passed over each atom one by one
         x = F.relu(self.conv1(x))
         # Aggregate features across atoms, reshape back to include block_size
@@ -248,29 +248,31 @@ class GPT(nn.Module):
     #JUST LOSS ON FINAL TOKEN IN BLOCK?
     def logit_loss(self, out, targets):
         split = self.config.vocab_size
-        idx = out[:,:,:split]
+        idx = out[:,-1,:split]
         coef = out[:,:,split:]
-        mags = coef[:,:,:self.config.num_atoms]  
+        mags = coef[:,-1,:self.config.num_atoms]  
         phase = coef[:,:,self.config.num_atoms:] 
-        
-        idx_target = targets[:,:,:split]
+        idx_target = targets[:,-1,:split]
         coef_target = targets[:,:,split:]
-        mags_target = coef_target[:,:,:self.config.num_atoms]  
+        mags_target = coef_target[:,-1,:self.config.num_atoms]  
         phase_target = coef_target[:,:,self.config.num_atoms:] 
-
+        # print("mags_target", mags_target.shape)
+        # print("mags", mags.shape)
+        # print("idx_target", idx_target.shape)
+        # print("idx", idx.shape)
         bce_loss = self.bce_loss_func(idx, idx_target)
         
-        # mask = mags_target > 0
-        # # print(torch.mean((torch.abs(mags[:,1:,:]-mags[:,:-1,:])),dim=[0,2]).cpu().numpy())
-        # mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
-        # mag_loss = mag_loss * mask  
-        # mag_loss = mag_loss.sum() / mask.sum() 
-        mag_loss = F.mse_loss(mags, mags_target) 
+        mask = mags_target > 0
+        mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
+        mag_loss = mag_loss * mask  
+        mag_loss = mag_loss.sum() / mask.sum() 
         
         mask = phase_target == 0.5
         phase_loss = self.circular_loss(phase, phase_target) 
         phase_loss = phase_loss * mask  
         phase_loss = phase_loss.sum() / mask.sum() 
+
+        phase_loss = torch.scalar_tensor(0.0, device = phase_loss.device)
 
         return torch.stack((bce_loss, mag_loss, phase_loss))
 
@@ -438,6 +440,44 @@ class GPT(nn.Module):
         flops_promised = 13.45e12 # NVIDIA GeForce RTX 2080 Ti
         mfu = flops_achieved / flops_promised
         return mfu
+    
+    @torch.no_grad()
+    def get_one_token(self, output, temperature=1.0, top_k=None):
+        if self.config.logit_loss:
+            #logit loss 
+            #comes out at vocab size logits + mags + phases (end to end)
+            split = self.config.vocab_size
+            #just the last in the sequence
+            logits = output[:,-1,:split]
+            logits /= temperature
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            probs = F.softmax(logits, dim=-1)
+            # print("probs",probs.detach().cpu().numpy())
+            idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
+            idx_next, _ = torch.sort(idx_next)
+            coef = output[:,-1,split:]
+            chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
+            if self.config.conv_input:
+                #normalise indices (end to end so first num_atoms)
+                chunk_next[:,:,:self.config.num_atoms] /= self.config.vocab_size
+                #Turn to 2d for conv input on next pass
+                #Do we reshaping rembmering we are generating as a batch!
+                chunk_next = chunk_next.view(chunk_next.size(1), 3, self.config.num_atoms)
+                chunk_next = chunk_next.transpose(1,2).unsqueeze(1)
+        else:
+            #mse loss
+            #comes out as normalised indexes + mags and phases in 2d shape (nx3)
+            #this is already correct for conv input
+            #just the last in the sequence
+            chunk_next = output[:,-1].unsqueeze(0)
+            if not self.config.conv_input:
+                #need to make end to end
+                chunk_next = torch.cat((chunk_next[:,:,:,0], chunk_next[:,:,:,1],chunk_next[:,:,:,2]), dim=2)
+                #need to unnormalise for embed input on next pass
+                chunk_next[:,:,::3] = torch.floor(chunk_next[:,:,::3]*self.config.vocab_size)
+        return chunk_next
 
     @torch.no_grad()
     def generate(self, chunks, max_new_tokens, temperature=1.0, top_k=None):
@@ -450,46 +490,7 @@ class GPT(nn.Module):
             chunks_cond = chunks[:, -self.config.block_size:]
             # print("chunk cond end",chunks_cond[:,-1][0,:5,:].cpu().numpy())
             output, _ = self(chunks_cond)
-            # print("output",output.cpu().numpy())
-            if self.config.logit_loss:
-                #logit loss 
-                #comes out at vocab size logits + mags + phases (end to end)
-                split = self.config.vocab_size
-                #just the last in the sequence
-                logits = output[:,-1,:split]
-                logits /= temperature
-                if top_k is not None:
-                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                    logits[logits < v[:, [-1]]] = -float('Inf')
-                probs = F.softmax(logits, dim=-1)
-                idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
-                idx_next, _ = torch.sort(idx_next)
-                coef = output[:,-1,split:]
-                chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
-                # print("chunk_next",chunk_next.shape)
-                if self.config.conv_input:
-                    #normalise indices (end to end so first num_atoms)
-                    chunk_next[:,:,:self.config.num_atoms] /= self.config.vocab_size
-                    #Turn to 2d for conv input on next pass
-                    chunk_next = chunk_next.view(3, self.config.num_atoms)
-                    chunk_next = chunk_next.t().unsqueeze(0).unsqueeze(0)
-            else:
-                #mse loss
-                #comes out as normalised indexes + mags and phases in 2d shape (nx3)
-                #this is already correct for conv input
-                #just the last in the sequence
-                chunk_next = output[:,-1].unsqueeze(0)
-                if not self.config.conv_input:
-                    #need to make end to end
-                    chunk_next = torch.cat((chunk_next[:,:,:,0], chunk_next[:,:,:,1],chunk_next[:,:,:,2]), dim=2)
-                    #need to unnormalise for embed input on next pass
-                    chunk_next[:,:,::3] = torch.floor(chunk_next[:,:,::3]*self.config.vocab_size)
-            
-            # print("chunk_next",chunk_next[0,0,:5,:].cpu().numpy())
-            # print("chunk_next",chunk_next.shape)
-            # print("chunks",chunks.shape)
-            # chunk_next torch.Size([1, 1, 50, 3])
-            # chunks torch.Size([1, 256, 50, 3])
+            chunk_next = self.get_one_token(output, temperature, top_k)
             chunks = torch.cat((chunks, chunk_next), dim=1)
-        
+
         return chunks
