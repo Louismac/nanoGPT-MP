@@ -251,15 +251,11 @@ class GPT(nn.Module):
         idx = out[:,-1,:split]
         coef = out[:,:,split:]
         mags = coef[:,-1,:self.config.num_atoms]  
-        phase = coef[:,:,self.config.num_atoms:] 
+        phase = coef[:,-1,self.config.num_atoms:] 
         idx_target = targets[:,-1,:split]
         coef_target = targets[:,:,split:]
         mags_target = coef_target[:,-1,:self.config.num_atoms]  
-        phase_target = coef_target[:,:,self.config.num_atoms:] 
-        # print("mags_target", mags_target.shape)
-        # print("mags", mags.shape)
-        # print("idx_target", idx_target.shape)
-        # print("idx", idx.shape)
+        phase_target = coef_target[:,-1,self.config.num_atoms:] 
         bce_loss = self.bce_loss_func(idx, idx_target)
         
         mask = mags_target > 0
@@ -272,7 +268,7 @@ class GPT(nn.Module):
         phase_loss = phase_loss * mask  
         phase_loss = phase_loss.sum() / mask.sum() 
 
-        phase_loss = torch.scalar_tensor(0.0, device = phase_loss.device)
+        phase_loss = torch.zeros_like(phase_loss)
 
         return torch.stack((bce_loss, mag_loss, phase_loss))
 
@@ -454,7 +450,6 @@ class GPT(nn.Module):
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             probs = F.softmax(logits, dim=-1)
-            # print("probs",probs.detach().cpu().numpy())
             idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
             idx_next, _ = torch.sort(idx_next)
             coef = output[:,-1,split:]
@@ -463,9 +458,9 @@ class GPT(nn.Module):
                 #normalise indices (end to end so first num_atoms)
                 chunk_next[:,:,:self.config.num_atoms] /= self.config.vocab_size
                 #Turn to 2d for conv input on next pass
-                #Do we reshaping rembmering we are generating as a batch!
                 chunk_next = chunk_next.view(chunk_next.size(1), 3, self.config.num_atoms)
                 chunk_next = chunk_next.transpose(1,2).unsqueeze(1)
+                # print("chunk_next", chunk_next.shape)
         else:
             #mse loss
             #comes out as normalised indexes + mags and phases in 2d shape (nx3)

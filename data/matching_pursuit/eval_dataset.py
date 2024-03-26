@@ -3,12 +3,14 @@ from datetime import datetime
 import soundfile as sf
 import torch
 import numpy as np
+import sys
+np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize) 
 import os
 config = {}
 config["num_atoms"] = 20
 config["dictionary_size"] = 1024
 config["chunk_size"] = 2048
-config["name"] = "taylor_vocals"
+config["name"] = "cello"
 device = 'cuda'
 device_type = "cuda"
 config["num_features"] = 3
@@ -93,17 +95,19 @@ def get_batch(split):
 
 X,y = get_batch("train")
 
-labels = X[:,:,:,::3].view(-1)
-labels = torch.floor(labels*config["dictionary_size"])
-# Get unique labels and their counts
-unique_labels, counts = torch.unique(labels, return_counts=True)
-# Sort labels and reindex counts
-sorted_indices = torch.argsort(counts)
-sorted_labels = unique_labels[sorted_indices]
-sorted_counts = counts[sorted_indices]
+mags = X[:,:,:,1::3]
+print(torch.mean(mags, dim=[0,1]))
+# labels = X[:,:,:,::3].view(-1)
+# labels = torch.floor(labels*config["dictionary_size"])
+# # Get unique labels and their counts
+# unique_labels, counts = torch.unique(labels, return_counts=True)
+# # Sort labels and reindex counts
+# sorted_indices = torch.argsort(counts)
+# sorted_labels = unique_labels[sorted_indices]
+# sorted_counts = counts[sorted_indices]
 
-# Display sorted class distribution
-for label, count in zip(sorted_labels.tolist(), sorted_counts.tolist()):
-    print(f'Class {label}: {count} occurrences')
+# # Display sorted class distribution
+# for label, count in zip(sorted_labels.tolist(), sorted_counts.tolist()):
+#     print(f'Class {label}: {count} occurrences')
 
 

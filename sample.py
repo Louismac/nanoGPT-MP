@@ -19,8 +19,8 @@ import soundfile as sf
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 1 # number of samples to draw
-max_new_tokens = 100 # number of tokens generated in each sample
+num_samples = 3 # number of samples to draw
+max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
@@ -98,7 +98,7 @@ if init_from == 'resume':
     # init from a model saved in a specific directory
     cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
     cache_path = os.path.join("data", dataset, cache_path)
-    checkpoint_path = os.path.join(cache_path, "26-Mar-2024-10-05-28/ckpt.pt")
+    checkpoint_path = os.path.join(cache_path, "26-Mar-2024-16-10-39/ckpt.pt")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     print("resume from checkpoint")
     gptconf = GPTConfig(**checkpoint['model_args'])
@@ -152,7 +152,6 @@ with torch.no_grad():
         for k in range(num_samples):
             pick = np.random.randint(len(x))
             input = x[pick]
-            print(input[-1].cpu().numpy())
             y = model.generate(input.unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
             #trim off seed

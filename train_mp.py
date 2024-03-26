@@ -98,10 +98,7 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
 cache_path = os.path.join("data", dataset, cache_path)
-from datetime import datetime
-timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
-checkpoint_path = os.path.join(cache_path, timestampStr)
-os.mkdir(checkpoint_path)
+
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -169,7 +166,7 @@ def get_batch(split):
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
     data = data[:,:config["num_atoms"],:]
     # print("data", data.shape)
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    ix = torch.randint(len(data) - block_size - config["curric_steps"], (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+block_size:i+block_size+config["curric_steps"]]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
@@ -368,6 +365,11 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 # Save metadata to a file
+                from datetime import datetime
+                timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
+                checkpoint_path = os.path.join(cache_path, timestampStr)
+                if not os.path.exists(checkpoint_path):
+                    os.mkdir(checkpoint_path)
                 with open(os.path.join(checkpoint_path, 'training_metadata.pkl'), 'wb') as f:
                     pickle.dump(config, f)
                 torch.save(checkpoint, os.path.join(checkpoint_path, 'ckpt.pt'))
@@ -384,21 +386,28 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            curric_iters = 200
+            curric_iters = 50
+            torch._dynamo.config.cache_size_limit = config["curric_steps"]+1 
             steps = 1 if iter_num < curric_iters else config["curric_steps"]
             for i in range(steps):
                 input_block = X[:,-config["block_size"]:]
                 input_target = Y[:,i].unsqueeze(1)
+                model.train()
                 output, split_loss = model(input_block, input_target)
                 # loss = split_loss.sum()
-                loss = split_loss[0] + split_loss[1]
                 # loss += (loss / config["curric_steps"]) # scale the loss to account for gradient accumulation
                 
-                if iter_num < curric_iters:
+                if iter_num > curric_iters:
                     model.eval()
-                    chunk_next = model.get_one_token(output)
-                    X = torch.cat((X, chunk_next), dim=1)
-
+                    with torch.no_grad():
+                        chunk_next = model.get_one_token(output)
+                        # print(chunk_next[:,:,:,1].cpu().numpy())
+                        X = torch.cat((X, chunk_next), dim=1)
+                        #over all atoms and batches, MAD between last two mags
+                        loop_loss = (1-torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1])))/10
+                        # print(loop_loss.cpu().numpy())
+                        split_loss[2]=loop_loss
+                loss = split_loss.sum()   
                 model.train()
                 scaler.scale(loss).backward()
                 if grad_clip != 0.0:
@@ -411,8 +420,6 @@ while True:
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
     
-    
-
     # timing and logging
     t1 = time.time()
     dt = t1 - t0
@@ -423,8 +430,8 @@ while True:
         lossf = split_loss * gradient_accumulation_steps
         writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
         writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
-        writer.add_scalar("phase_loss x step", lossf[2].item(), iter_num)
-        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, phase_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
+        writer.add_scalar("loop_loss x step", lossf[2].item(), iter_num)
+        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, loop_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
     iter_num += 1
     local_iter_num += 1
 
