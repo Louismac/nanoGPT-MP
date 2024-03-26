@@ -404,9 +404,11 @@ while True:
                         # print(chunk_next[:,:,:,1].cpu().numpy())
                         X = torch.cat((X, chunk_next), dim=1)
                         #over all atoms and batches, MAD between last two mags
-                        loop_loss = (1-torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1])))/10
-                        # print(loop_loss.cpu().numpy())
-                        split_loss[2]=loop_loss
+                        loop_loss = 0
+                        for j in range(1,i+1):
+                            loop_loss += (1-torch.mean(torch.abs(X[:,-i,:,1]-X[:,-(i+1),:,1])))
+                        loop_loss /= i
+                        split_loss[2] = loop_loss*0.3
                 loss = split_loss.sum()   
                 model.train()
                 scaler.scale(loss).backward()
