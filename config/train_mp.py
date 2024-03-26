@@ -1,6 +1,6 @@
 out_dir = 'out-mp'
 eval_interval = 500 # keep frequent because we'll overfit
-eval_iters = 200
+eval_iters = 20
 log_interval = 10 # don't print too too often
 
 # we expect to overfit on this small dataset, so only save when val improves
@@ -11,8 +11,8 @@ wandb_project = 'mp'
 wandb_run_name = 'mini-gpt'
 
 #mp stuff 
-logit_loss = False
-conv_input = False
+logit_loss = True
+conv_input = True
 num_atoms = 20
 num_features = 3
 name = "cello"

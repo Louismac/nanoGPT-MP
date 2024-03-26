@@ -260,10 +260,12 @@ class GPT(nn.Module):
 
         bce_loss = self.bce_loss_func(idx, idx_target)
         
-        mask = mags_target > 0
-        mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
-        mag_loss = mag_loss * mask  
-        mag_loss = mag_loss.sum() / mask.sum() 
+        # mask = mags_target > 0
+        # # print(torch.mean((torch.abs(mags[:,1:,:]-mags[:,:-1,:])),dim=[0,2]).cpu().numpy())
+        # mag_loss = F.mse_loss(mags, mags_target, reduction="none") 
+        # mag_loss = mag_loss * mask  
+        # mag_loss = mag_loss.sum() / mask.sum() 
+        mag_loss = F.mse_loss(mags, mags_target) 
         
         mask = phase_target == 0.5
         phase_loss = self.circular_loss(phase, phase_target) 
@@ -445,9 +447,7 @@ class GPT(nn.Module):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
         for i in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
             chunks_cond = chunks[:, -self.config.block_size:]
-            # forward the model to get the logits for the index in the sequence
             # print("chunk cond end",chunks_cond[:,-1][0,:5,:].cpu().numpy())
             output, _ = self(chunks_cond)
             # print("output",output.cpu().numpy())
