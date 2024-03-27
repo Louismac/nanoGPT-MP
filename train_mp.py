@@ -296,13 +296,13 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
-        # print("estimate_loss", eval_iters)
-        # for k in range(eval_iters):
-        #     X, Y = get_batch(split)
-        #     with ctx:
-        #         logits, split_loss = model(X, Y)
-        #         loss = split_loss.sum()
-        #     losses[k] = loss.item()
+        print("estimate_loss", eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            with ctx:
+                _, split_loss = model(X, Y[:,0].unsqueeze(1))
+                loss = split_loss.sum()
+            losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
     return out
@@ -389,26 +389,42 @@ while True:
             pre_steps = 50
             torch._dynamo.config.cache_size_limit = config["curric_steps"]+1 
             steps = 1 if iter_num < pre_steps else config["curric_steps"]
+            if config["conv_input"]:
+                diff = X[:,-1,:,1]-X[:,-2,:,1]
+            else:
+                diff = X[:,-1,config["num_atoms"]:config["num_atoms"]*2]-X[:,-2,config["num_atoms"]:config["num_atoms"]*2]
+            target_loop_loss = torch.mean(torch.abs(diff), dim = (0))
             for i in range(steps):
+                #input with newly generated data (so loss is between inference and target)
                 input_block = X[:,-config["block_size"]:]
                 input_target = Y[:,i].unsqueeze(1)
                 model.train()
                 output, split_loss = model(input_block, input_target)
                 
                 if iter_num > pre_steps:
-                    model.eval()
                     with torch.no_grad():
+                        #Generate the next step
+                        model.eval()
                         chunk_next = model.get_one_token(output)
                         X = torch.cat((X, chunk_next), dim=1)
                         #over all atoms and batches, MAE between last mag and generated mag
-                        loop_loss = (1-torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1])))/10
-                        split_loss[2] = loop_loss
+                        if config["conv_input"]:
+                            diff = X[:,-1,:,1]-X[:,-2,:,1]
+                        else:
+                            #its the middle slice of end to end
+                            diff = X[:,-1,config["num_atoms"]:config["num_atoms"]*2]-X[:,-2,config["num_atoms"]:config["num_atoms"]*2]
+                        loop_loss = torch.mean(torch.abs(diff), dim = (0))
+                        #Compare to expected (based on ground truth from batch)
+                        loop_loss_diff = torch.mean(torch.abs(loop_loss - target_loop_loss))
+                        #Add to loss to optimise against looping behaviours
+                        split_loss[2] = loop_loss_diff
 
+                #accumulate loss over updates
                 loss = split_loss.sum()
                 loss /= steps
                 scaler.scale(loss).backward()
 
-        #accumulate loss over updates and then step
+        #Step (batch is actually like 31*32=~900)
         if grad_clip != 0.0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -430,7 +446,7 @@ while True:
         writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
         writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
         writer.add_scalar("loop_loss x step", lossf[2].item(), iter_num)
-        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, loop_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms")
+        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, loop_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
     iter_num += 1
     local_iter_num += 1
 

@@ -37,7 +37,7 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 dataset = 'matching_pursuit'
-checkpoint_path = "data/matching_pursuit/cello_2048_1024_80/26-Mar-2024-19-35-09/ckpt.pt"
+checkpoint_path = "data/matching_pursuit/cello_2048_1024_80/27-Mar-2024-13-32-20/ckpt.pt"
 checkpoint = torch.load(checkpoint_path, map_location=device)
 config = checkpoint["config"]
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
@@ -55,6 +55,7 @@ def get_batch(split):
     saved_atoms = 100
     num_features = (saved_atoms*3)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
+    print("DATASET", data.shape)
     data = data[:,:config["num_atoms"],:]
     ix = torch.randint(len(data) - config["block_size"], (config["batch_size"],))
     x = torch.stack([torch.from_numpy((data[i:i+config["block_size"]]).astype(np.float32)) for i in ix])
@@ -132,8 +133,9 @@ with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             pick = np.random.randint(len(x))
-            input = x[pick]
-            y = model.generate(input.unsqueeze(0), max_new_tokens, temperature=temperature, top_k=top_k)
+            input = x[pick].unsqueeze(0)
+            # input =  torch.rand(input.shape, dtype = input.dtype, device = input.device)
+            y = model.generate(input, max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
             #trim off seed
             # y = y[config["block_size"]:]

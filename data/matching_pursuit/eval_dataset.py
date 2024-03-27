@@ -7,7 +7,7 @@ import sys
 np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize) 
 import os
 config = {}
-config["num_atoms"] = 20
+config["num_atoms"] = 80
 config["dictionary_size"] = 1024
 config["chunk_size"] = 2048
 config["name"] = "cello"
@@ -94,9 +94,12 @@ def get_batch(split):
     return x, y
 
 X,y = get_batch("train")
+# mags = X[:,:,:,1::3]
+target_loop_loss = torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1]), dim = (0))
+X,y = get_batch("train")
+loop_loss = torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1]), dim = (0))
+print(torch.mean(torch.abs(target_loop_loss - loop_loss)))
 
-mags = X[:,:,:,1::3]
-print(torch.mean(mags, dim=[0,1]))
 # labels = X[:,:,:,::3].view(-1)
 # labels = torch.floor(labels*config["dictionary_size"])
 # # Get unique labels and their counts

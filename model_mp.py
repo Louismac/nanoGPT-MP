@@ -31,7 +31,6 @@ class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        print(config.n_embd, config.n_head)
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
@@ -123,6 +122,7 @@ class CustomEmbedding(nn.Module):
         #kernel is same size as features, passed over each atom one by one
         x = F.relu(self.conv1(x))
         # Aggregate features across atoms, reshape back to include block_size
+        # The output is like having an embedding vector per item in the sequence
         x = x.sum(dim=2).view(batch_size, block_size, -1)  
         return x
 
@@ -143,12 +143,10 @@ class GPTConfig:
 class Transformer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        print("vocab_size", config.vocab_size,"n_embd", config.n_embd)
         if config.conv_input:
             self.wte = CustomEmbedding(config.num_features, config.n_embd)
         else:
             self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        print("block_size", config.block_size,"n_embd", config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
         self.drop = nn.Dropout(config.dropout)
         self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
@@ -453,14 +451,16 @@ class GPT(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
             idx_next, _ = torch.sort(idx_next)
             coef = output[:,-1,split:]
-            chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
             if self.config.conv_input:
+                chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
                 #normalise indices (end to end so first num_atoms)
                 chunk_next[:,:,:self.config.num_atoms] /= self.config.vocab_size
                 #Turn to 2d for conv input on next pass
                 chunk_next = chunk_next.view(chunk_next.size(1), 3, self.config.num_atoms)
                 chunk_next = chunk_next.transpose(1,2).unsqueeze(1)
                 # print("chunk_next", chunk_next.shape)
+            else:
+                chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(1)
         else:
             #mse loss
             #comes out as normalised indexes + mags and phases in 2d shape (nx3)
