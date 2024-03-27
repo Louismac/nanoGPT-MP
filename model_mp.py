@@ -175,22 +175,25 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
+        config.vocab_size = 1024 * 50
         self.config = config
+        
         print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd, config.num_features)
         self.transformer = Transformer(config)
         print("done transformer")
-        n_output = config.num_atoms*config.num_features
-        if config.logit_loss:
-            n_output = config.vocab_size + (config.num_atoms*2)
-        print("config.logit_loss", config.logit_loss, n_output)
         
+        # n_output = config.num_atoms*config.num_features
+        # if config.logit_loss:
+        #     n_output = config.vocab_size + (config.num_atoms*2)
+        # print("config.logit_loss", config.logit_loss, n_output)
+        n_output = config.vocab_size
         self.lm_head = nn.Linear(config.n_embd, n_output, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         print("self.lm_head.weight", self.lm_head.weight.shape)
-        self.bce_loss_func = nn.BCEWithLogitsLoss()
+        self.bce_loss_func = nn.BCEWithLogitsLoss(pos_weight= torch.tensor(990))
 
         #I HAVE OCMMENTED OUT WEIGHT TYING LOUIS
 
@@ -285,13 +288,10 @@ class GPT(nn.Module):
             # forward the GPT model itself
             tok_emb = self.transformer.wte(inputs) # token embeddings of shape (b, t, n_embd)
         else:
-            idx = inputs[:,:,:self.config.num_atoms].long()
-            coef = inputs[:,:,self.config.num_atoms:]
-            mag = coef[:,:,:self.config.num_atoms]
+            idx = inputs.long()
             b, t, f = idx.size()
             tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, num_atoms, n_embd)
-            weighted_tok_emb = tok_emb *  mag.unsqueeze(-1)
-            tok_emb = torch.sum(weighted_tok_emb, dim=2)
+            tok_emb = torch.sum(tok_emb, dim=2)
 
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(1) # shape (t)
         #this embeds the position in the block
@@ -304,16 +304,16 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        loss = None
+        loss = torch.zeros(3, device=device, dtype=torch.float)
         
         out = self.lm_head(x)
 
         if self.config.logit_loss:
             #sig the coeffiecents
-            out[:,:,self.config.vocab_size:] = F.sigmoid(out[:,:,self.config.vocab_size:])
             if targets is not None:
                 # loss = self.logit_loss(out[:,-1,:].unsqueeze(1), targets[:,-1,:].unsqueeze(1))
-                loss = self.logit_loss(out, targets)
+                
+                loss[0] = self.bce_loss_func(out[:,-1,:].unsqueeze(1), targets)
         #all mse
         else:
             b,s,f = out.shape
@@ -439,39 +439,15 @@ class GPT(nn.Module):
     def get_one_token(self, output, temperature=1.0, top_k=None):
         if self.config.logit_loss:
             #logit loss 
-            #comes out at vocab size logits + mags + phases (end to end)
-            split = self.config.vocab_size
             #just the last in the sequence
-            logits = output[:,-1,:split]
+            logits = output[:,-1]
             logits /= temperature
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=self.config.num_atoms, replacement=False)
-            idx_next, _ = torch.sort(idx_next)
-            coef = output[:,-1,split:]
-            if self.config.conv_input:
-                chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(0)
-                #normalise indices (end to end so first num_atoms)
-                chunk_next[:,:,:self.config.num_atoms] /= self.config.vocab_size
-                #Turn to 2d for conv input on next pass
-                chunk_next = chunk_next.view(chunk_next.size(1), 3, self.config.num_atoms)
-                chunk_next = chunk_next.transpose(1,2).unsqueeze(1)
-                # print("chunk_next", chunk_next.shape)
-            else:
-                chunk_next = torch.cat((idx_next, coef), dim=1).unsqueeze(1)
-        else:
-            #mse loss
-            #comes out as normalised indexes + mags and phases in 2d shape (nx3)
-            #this is already correct for conv input
-            #just the last in the sequence
-            chunk_next = output[:,-1].unsqueeze(0)
-            if not self.config.conv_input:
-                #need to make end to end
-                chunk_next = torch.cat((chunk_next[:,:,:,0], chunk_next[:,:,:,1],chunk_next[:,:,:,2]), dim=2)
-                #need to unnormalise for embed input on next pass
-                chunk_next[:,:,::3] = torch.floor(chunk_next[:,:,::3]*self.config.vocab_size)
+            chunk_next = idx_next.unsqueeze(1)
         return chunk_next
 
     @torch.no_grad()
@@ -483,9 +459,10 @@ class GPT(nn.Module):
         """
         for i in range(max_new_tokens):
             chunks_cond = chunks[:, -self.config.block_size:]
-            # print("chunk cond end",chunks_cond[:,-1][0,:5,:].cpu().numpy())
             output, _ = self(chunks_cond)
             chunk_next = self.get_one_token(output, temperature, top_k)
+            # print("chunk_next",chunk_next.shape)
+            # print("chunks",chunks.shape)
             chunks = torch.cat((chunks, chunk_next), dim=1)
 
         return chunks

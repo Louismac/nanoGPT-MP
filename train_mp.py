@@ -137,21 +137,34 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+config["mag_buckets"] = 50
+
+def encode_indices(indices, mags):
+    return indices * config["mag_buckets"] + mags
+
+def decode_indices(encoded_indices):
+    indices  = encoded_indices // config["mag_buckets"]
+    mags = encoded_indices % config["mag_buckets"]
+    return indices, mags
+
+def bucket_mags(mags):
+    scaled_mags = mags * config["mag_buckets"]
+    scaled_mags = torch.clamp(scaled_mags, 0, config["mag_buckets"] - 1)
+    return scaled_mags.floor().long()
 
 def get_sparse(y):
     #sparse
     indices = y[:,:,:config["num_atoms"]].long()
-    coeff = y[:,:,config["num_atoms"]:]
+    mags = y[:,:,config["num_atoms"]:]
+    
+    mags = bucket_mags(mags)
     b, s, a = indices.shape
-    sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
+    combined = encode_indices(indices, mags)
+    sparse = torch.zeros(b, s, config["dictionary_size"]*config["mag_buckets"], dtype=torch.float32, device=device)
     for i in range(a):
         #DIM, INDICES, VALUES
-        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
-    # print("indices", indices.cpu().numpy())
-    # print("sparse", sparse.cpu().numpy())
+        sparse.scatter_add_(2, combined[:, :, i:i+1], torch.ones_like(combined[:, :, i:i+1], dtype=torch.float32))
     sparse.clamp_(max=1)
-    #ADD IN COEFF
-    sparse = torch.cat([sparse.float(), coeff], dim=-1)
     return sparse
 
 # poor man's data loader
@@ -166,7 +179,9 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
+    #drop phase
     data = data[:,:config["num_atoms"],:]
+
     # print("data", data.shape)
     ix = torch.randint(len(data) - block_size - config["curric_steps"], (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
@@ -176,35 +191,32 @@ def get_batch(split):
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-   
-    x = x[:,:,:,:config["num_features"]]
-    #normalise into the range 0-1 (from -pi - pi)
-    x[:,:,:,2] += torch.pi
-    x[:,:,:,2] /= (2*torch.pi)
+    
+    #drop phase
+    x = x[:,:,:,:2]
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
         x[:,:,:,0] /= (config["dictionary_size"])
     else :
-        #flatten [100x3 into 300]
-        x = x.view(x.size(0), x.size(1), -1)
+        #flatten [100x2 into 200]
+        x = x.reshape(x.size(0), x.size(1), -1)
         #deinterleave
-        x = torch.cat((x[:,:,::3], x[:,:,1::3],x[:,:,2::3]), dim=2)
+        indices = x[:,:,::2]
+        mags = x[:,:,1::2]
+        mags = bucket_mags(mags)
+        x = encode_indices(indices, mags)
 
-    y = y[:,:,:,:config["num_features"]]
-    #normalise into the range 0-1 (from -pi - pi)
-    y[:,:,:,2] += torch.pi
-    y[:,:,:,2] /= (2*torch.pi)
+    y = y[:,:,:,:2]
 
     if config["logit_loss"]:
-        #flatten [100x3 into 300]
-        y = y.view(y.size(0), y.size(1), -1)
+        #flatten [100x2 into 200]
+        y = y.reshape(y.size(0), y.size(1), -1)
         #deinterleave
-        y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
+        y = torch.cat((y[:,:,::2], y[:,:,1::2]), dim=2)
         y = get_sparse(y)
     else:
         #normalise into the range 0-1 (0 - dictionary_size)
         y[:,:,:,0] /= (config["dictionary_size"])
-
     return x, y
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -407,18 +419,6 @@ while True:
                         model.eval()
                         chunk_next = model.get_one_token(output)
                         X = torch.cat((X, chunk_next), dim=1)
-                        #over all atoms and batches, MAE between last mag and generated mag
-                        if config["conv_input"]:
-                            diff = X[:,-1,:,1]-X[:,-2,:,1]
-                        else:
-                            #its the middle slice of end to end
-                            diff = X[:,-1,config["num_atoms"]:config["num_atoms"]*2]-X[:,-2,config["num_atoms"]:config["num_atoms"]*2]
-                        loop_loss = torch.mean(torch.abs(diff), dim = (0))
-                        #Compare to expected (based on ground truth from batch)
-                        loop_loss_diff = torch.mean(torch.abs(loop_loss - target_loop_loss))
-                        #Add to loss to optimise against looping behaviours
-                        split_loss[2] = loop_loss_diff
-
                 #accumulate loss over updates
                 loss = split_loss.sum()
                 loss /= steps
