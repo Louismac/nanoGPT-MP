@@ -24,31 +24,9 @@ max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
-
-num_atoms = 100
-file_name = "taylor_vocals"
-name = "taylor_vocals"
-chunk_size = 2048
-hop_length = chunk_size//2
-sr = 44100
-dictionary_size = 10000
-dataset = 'matching_pursuit'
-batch_size = 64
-block_size = 256 
-logit_loss = False
-num_features = 3
-conv_input = False
-
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
-exec(open('configurator.py').read()) # overrides from command line or config file
-config = {k: globals()[k] for k in config_keys} # will be useful for logging
-print("config", config)
-cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
-cache_path = os.path.join("data", dataset, cache_path)
-
 # -----------------------------------------------------------------------------
 
 torch.manual_seed(seed)
@@ -58,6 +36,13 @@ torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+dataset = 'matching_pursuit'
+checkpoint_path = "data/matching_pursuit/cello_2048_1024_80/26-Mar-2024-19-35-09/ckpt.pt"
+checkpoint = torch.load(checkpoint_path, map_location=device)
+config = checkpoint["config"]
+cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
+cache_path = os.path.join("data", dataset, cache_path)  
+print("resume from checkpoint", config)
 
 # poor man's data loader
 def get_batch(split):
@@ -71,8 +56,8 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
     data = data[:,:config["num_atoms"],:]
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
+    ix = torch.randint(len(data) - config["block_size"], (config["batch_size"],))
+    x = torch.stack([torch.from_numpy((data[i:i+config["block_size"]]).astype(np.float32)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x = x.pin_memory().to(device, non_blocking=True)
@@ -92,19 +77,15 @@ def get_batch(split):
         x = torch.cat((x[:,:,::3], x[:,:,1::3],x[:,:,2::3]), dim=2)
 
     return x
+# init from a model saved in a specific directory
 
 # model
 if init_from == 'resume':
-    # init from a model saved in a specific directory
-    cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
-    cache_path = os.path.join("data", dataset, cache_path)
-    checkpoint_path = os.path.join(cache_path, "26-Mar-2024-16-10-39/ckpt.pt")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    print("resume from checkpoint")
+    
     gptconf = GPTConfig(**checkpoint['model_args'])
-    gptconf.logit_loss = logit_loss 
-    gptconf.num_features = num_features 
-    gptconf.conv_input = conv_input 
+    gptconf.logit_loss = config["logit_loss"]
+    gptconf.num_features = config["num_features"]
+    gptconf.conv_input = config["conv_input"] 
     model = GPT(gptconf)
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'

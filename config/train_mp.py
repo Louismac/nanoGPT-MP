@@ -13,7 +13,7 @@ wandb_run_name = 'mini-gpt'
 #mp stuff 
 logit_loss = True
 conv_input = True
-num_atoms = 20
+num_atoms = 80
 num_features = 3
 name = "cello"
 chunk_size = 2048
@@ -23,24 +23,17 @@ dictionary_size = chunk_size//2
 
 dataset = 'matching_pursuit'
 gradient_accumulation_steps = 1
-curric_steps = 15
+curric_steps = 31
 batch_size = 64
-block_size = 256 # context of up to 256 previous characters
-
-# baby GPT model :)
+block_size = 256 
+#batch = 31*32*512 = ~0.5M?
 n_layer = 12
 n_head = 12
 n_embd = 300
-dropout = 0.3
+dropout = 0.1
 
-learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+learning_rate = 1e-4 
 max_iters = 2000
-lr_decay_iters = 2000 # make equal to max_iters usually
+lr_decay_iters = 2000
 min_lr = 1e-5 # learning_rate / 10 usually
 beta2 = 0.95
-
-warmup_iters = 100 # not super necessary potentially
-
-# on macbook also add
-# device = 'cpu'  # run on cpu only
-# compile = False # do not torch compile the model

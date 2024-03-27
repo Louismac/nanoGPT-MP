@@ -42,8 +42,6 @@ def preprocess_data_embedding(path, chunk_size=2048, hop_length=1024, sr=44100,
 
 def get_run_name(name, chunk_size, dictionary_size, num_atoms):
     dir = name + "_" + str(chunk_size) + "_" + str(dictionary_size) + "_" + str(num_atoms)
-    if not exists(dir):
-        mkdir(dir)
     return dir
 
 def process_in_chunks(signal, dictionary, chunk_size=2048, hop_length = 1024,

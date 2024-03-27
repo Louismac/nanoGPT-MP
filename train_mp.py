@@ -57,6 +57,8 @@ batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch si
 block_size = 1024
 # model
 n_layer = 12
+n_head = 12
+n_embd = 300
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -74,7 +76,6 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 
-
 num_atoms = 20
 num_features=3
 file_name = "../assets/Wiley_10.wav"
@@ -86,6 +87,7 @@ name = "test"
 logit_loss = True
 conv_input = False
 from data.matching_pursuit.matching_pursuit import get_run_name
+# Save metadata to a file
 
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
@@ -98,7 +100,9 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 print(config)
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
 cache_path = os.path.join("data", dataset, cache_path)
-
+from datetime import datetime
+timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
+checkpoint_path = os.path.join(cache_path, timestampStr)
 # -----------------------------------------------------------------------------
 
 # various inits, derived attributes, I/O setup
@@ -136,8 +140,6 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 def get_sparse(y):
     #sparse
-    #deinterleave
-    y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
     indices = y[:,:,:config["num_atoms"]].long()
     coeff = y[:,:,config["num_atoms"]:]
     b, s, a = indices.shape
@@ -196,7 +198,8 @@ def get_batch(split):
     if config["logit_loss"]:
         #flatten [100x3 into 300]
         y = y.view(y.size(0), y.size(1), -1)
-        #get sparse + end to end mags and phases
+        #deinterleave
+        y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
         y = get_sparse(y)
     else:
         #normalise into the range 0-1 (0 - dictionary_size)
@@ -364,10 +367,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                # Save metadata to a file
-                from datetime import datetime
-                timestampStr = datetime.now().strftime("%d-%b-%Y-%H-%M-%S")
-                checkpoint_path = os.path.join(cache_path, timestampStr)
+                
                 if not os.path.exists(checkpoint_path):
                     os.mkdir(checkpoint_path)
                 with open(os.path.join(checkpoint_path, 'training_metadata.pkl'), 'wb') as f:
@@ -386,47 +386,44 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            curric_iters = 50
+            pre_steps = 50
             torch._dynamo.config.cache_size_limit = config["curric_steps"]+1 
-            steps = 1 if iter_num < curric_iters else config["curric_steps"]
+            steps = 1 if iter_num < pre_steps else config["curric_steps"]
             for i in range(steps):
                 input_block = X[:,-config["block_size"]:]
                 input_target = Y[:,i].unsqueeze(1)
                 model.train()
                 output, split_loss = model(input_block, input_target)
-                # loss = split_loss.sum()
-                # loss += (loss / config["curric_steps"]) # scale the loss to account for gradient accumulation
                 
-                if iter_num > curric_iters:
+                if iter_num > pre_steps:
                     model.eval()
                     with torch.no_grad():
                         chunk_next = model.get_one_token(output)
-                        # print(chunk_next[:,:,:,1].cpu().numpy())
                         X = torch.cat((X, chunk_next), dim=1)
-                        #over all atoms and batches, MAD between last two mags
-                        loop_loss = 0
-                        for j in range(1,i+1):
-                            loop_loss += (1-torch.mean(torch.abs(X[:,-i,:,1]-X[:,-(i+1),:,1])))
-                        loop_loss /= i
-                        split_loss[2] = loop_loss*0.3
-                loss = split_loss.sum()   
-                model.train()
+                        #over all atoms and batches, MAE between last mag and generated mag
+                        loop_loss = (1-torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1])))/10
+                        split_loss[2] = loop_loss
+
+                loss = split_loss.sum()
+                loss /= steps
                 scaler.scale(loss).backward()
-                if grad_clip != 0.0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+
+        #accumulate loss over updates and then step
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad(set_to_none=True)
 
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
     
-    # timing and logging
-    t1 = time.time()
-    dt = t1 - t0
-    t0 = t1
     if iter_num % log_interval == 0 and master_process:
+        # timing and logging
+        t1 = time.time()
+        dt = t1 - t0
+        t0 = t1
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = split_loss * gradient_accumulation_steps
