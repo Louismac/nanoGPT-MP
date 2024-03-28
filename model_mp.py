@@ -197,7 +197,6 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
-        config.vocab_size = 1024 * 80
         self.config = config
         
         print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd, config.num_features)
@@ -335,7 +334,16 @@ class GPT(nn.Module):
                 # loss = self.logit_loss(out[:,-1,:].unsqueeze(1), targets[:,-1,:].unsqueeze(1))
                 # loss[0] = self.bce_loss_func(out[:,-1,:].unsqueeze(1), targets)
                 # loss[0] = self.bce_loss_func(out[:,-1,:], targets[:,-1,:])
-                loss = self.bce_loss_func(out, targets)
+                loss = self.bce_loss_func(out, targets)               
+                # losses = []
+                # #for num_atoms
+                # for i in range(targets.shape[2]):
+                #     logits = out[:,:,i]
+                #     pos_t = targets[:,:,i]
+                #     class_loss = F.cross_entropy(logits, pos_t)
+                #     losses.append(class_loss)
+                #     # print(class_loss)
+                # loss=torch.stack(losses).mean()
         #all mse
         else:
             b,s,f = out.shape

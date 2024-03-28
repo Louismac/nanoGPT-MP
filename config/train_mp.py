@@ -1,6 +1,6 @@
 out_dir = 'out-mp'
-eval_interval = 500 # keep frequent because we'll overfit
-eval_iters = 200
+eval_interval = 2000 # keep frequent because we'll overfit
+eval_iters = 2
 log_interval = 10 # don't print too too often
 
 # we expect to overfit on this small dataset, so only save when val improves
@@ -13,18 +13,20 @@ wandb_run_name = 'mini-gpt'
 #mp stuff 
 logit_loss = True
 conv_input = False
-num_atoms = 20
+num_atoms = 50
 num_features = 3
-name = "cello"
-chunk_size = 2048
-hop_length = chunk_size//4
+name = "taylor_1024"
+chunk_size = 1024
+hop_length = 512
 sr = 44100
-dictionary_size = chunk_size//2
+dictionary_size = 512
+phase_buckets = 4
+mag_buckets = 50
 
 dataset = 'matching_pursuit'
 gradient_accumulation_steps = 1
 curric_steps = 1
-batch_size = 16
+batch_size = 32
 block_size = 128 
 #batch = 31*32*
 n_layer = 6
@@ -35,8 +37,8 @@ dropout = 0.3
 #keep this high, make sure to have a short warmup set
 learning_rate = 1e-2
 
-max_iters = 2000
+max_iters = 10000
 lr_decay_iters = max_iters
-min_lr = 1e-3 # learning_rate / 10 usually
+min_lr = 1e-2 # learning_rate / 10 usually
 beta2 = 0.95
 warmup_iters = 100

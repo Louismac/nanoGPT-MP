@@ -85,6 +85,8 @@ dictionary_size = 5000
 name = "test"
 logit_loss = True
 conv_input = False
+phase_buckets = 4
+mag_buckets = 40
 from data.matching_pursuit.matching_pursuit import get_run_name
 # Save metadata to a file
 
@@ -136,18 +138,9 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-config["mag_buckets"] = 20
-config["phase_buckets"] = 4
+
 mag_edges = torch.zeros(0)
 phase_edges = torch.zeros(0)
-
-# def encode_indices(indices, mags):
-#     return indices * config["mag_buckets"] + mags
-
-# def decode_indices(encoded_indices):
-#     indices  = encoded_indices // config["mag_buckets"]
-#     mags = encoded_indices % config["mag_buckets"]
-#     return indices, mags
 
 def encode_indices_3d(indices, mags, phases):
     composite_index = ((indices * config["mag_buckets"] + mags) * config["phase_buckets"]) + phases
@@ -160,6 +153,7 @@ def decode_indices_3d(encoded_indices):
     mags = intermediate_index % config["mag_buckets"]
     return indices, mags, phases
 
+#Get bucket edges that get the most uniform distribution
 def get_edges(vals, num_buckets):
     sorted_tensor, _ = torch.sort(vals.reshape(-1))
     total_elements = sorted_tensor.numel()
@@ -179,22 +173,24 @@ def bucket(vals, edges):
     return bucket_indices
 
 def get_sparse(y):
-    #sparse
     indices = y[:,:,:config["num_atoms"]].long()
     mags = y[:,:,config["num_atoms"]:config["num_atoms"]*2]
     phases = y[:,:,config["num_atoms"]*2:]
-    set_edges(mags, phases)
     
+    set_edges(mags, phases)
     mags = bucket(mags, mag_edges)
     phases = bucket(phases, phase_edges)
+
     b, s, a = indices.shape
     combined = encode_indices_3d(indices, mags, phases)
+    
     sparse = torch.zeros(b, s, config["dictionary_size"]*config["mag_buckets"]*config["phase_buckets"], dtype=torch.float32, device=device)
     for i in range(a):
         #DIM, INDICES, VALUES
         sparse.scatter_add_(2, combined[:, :, i:i+1], torch.ones_like(combined[:, :, i:i+1], dtype=torch.float32))
     sparse.clamp_(max=1)
-    return sparse
+    r
+    eturn sparse
 
 # poor man's data loader
 def get_batch(split):
@@ -208,7 +204,6 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
-    data = data[:,:config["num_atoms"],:]
 
     # print("data", data.shape)
     ix = torch.randint(len(data) - block_size - config["curric_steps"], (batch_size,))
@@ -224,23 +219,45 @@ def get_batch(split):
         #normalise into the range 0-1 (0 - dictionary_size)
         x[:,:,:,0] /= (config["dictionary_size"])
     else :
+        
+        #split based on biggest mags
+        mags = x[:,:,:,1]
+        _, indices = mags.sort(descending=True)
+        selected_indices = indices[:, :, :config["num_atoms"]]
+        batch_indices = torch.arange(batch_size).view(batch_size, 1, 1, 1).expand(-1, block_size, config["num_atoms"], 3)
+        seq_indices = torch.arange(block_size).view(1, block_size, 1, 1).expand(batch_size, -1, config["num_atoms"], 3)
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1, -1, -1, 3)
+        x = x[batch_indices, seq_indices, selected_indices, torch.arange(3)]
+
         #flatten [100x3 into 300]
         x = x.reshape(x.size(0), x.size(1), -1)
         #deinterleave
         indices = x[:,:,::3]
         mags = x[:,:,1::3]
         phases = x[:,:,2::3]
+        #bucket
         set_edges(mags, phases)
         mags = bucket(mags, mag_edges)
         phases = bucket(phases, phase_edges)
+        #encode into 1 token (from 3)
         x = encode_indices_3d(indices, mags, phases)
 
     if config["logit_loss"]:
+        #split based on biggest mags
+        mags = y[:,:,:,1]
+        _, indices = mags.sort(descending=True)
+        selected_indices = indices[:, :, :config["num_atoms"]]
+        batch_indices = torch.arange(batch_size).view(batch_size, 1, 1, 1).expand(-1, block_size, config["num_atoms"], 3)
+        seq_indices = torch.arange(block_size).view(1, block_size, 1, 1).expand(batch_size, -1, config["num_atoms"], 3)
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1, -1, -1, 3)
+        y = y[batch_indices, seq_indices, selected_indices, torch.arange(3)]
+        
         #flatten [100x3 into 300]
         y = y.reshape(y.size(0), y.size(1), -1)
         #deinterleave
         y = torch.cat((y[:,:,::3], y[:,:,1::3], y[:,:,2::3]), dim=2)
         y = get_sparse(y)
+
     else:
         #normalise into the range 0-1 (0 - dictionary_size)
         y[:,:,:,0] /= (config["dictionary_size"])
@@ -260,9 +277,10 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-meta_vocab_size = dictionary_size
+meta_vocab_size = dictionary_size * config["mag_buckets"] * config["phase_buckets"]
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size, num_atoms = num_atoms,
-                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features, logit_loss=logit_loss, conv_input = conv_input) 
+                  bias=bias, vocab_size=None, dropout=dropout, num_features=num_features, logit_loss=logit_loss, 
+                  conv_input = conv_input) 
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -388,18 +406,10 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         print(X.shape, Y.shape)
-        losses = estimate_loss()
-        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-        if wandb_log:
-            wandb.log({
-                "iter": iter_num,
-                "train/loss": losses['train'],
-                "val/loss": losses['val'],
-                "lr": lr,
-                "mfu": running_mfu*100, # convert to percentage
-            })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
-            best_val_loss = losses['val']
+        losses = torch.zeros(0)
+        # print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        if  always_save_checkpoint:
+            # best_val_loss = losses['val']
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),

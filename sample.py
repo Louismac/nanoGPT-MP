@@ -21,8 +21,8 @@ out_dir = 'out_mp' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 3 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+temperature = 1.0 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 100 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
@@ -37,7 +37,7 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 dataset = 'matching_pursuit'
-checkpoint_path = "data/matching_pursuit/cello_2048_1024_20/28-Mar-2024-11-06-52/ckpt.pt"
+checkpoint_path = "data/matching_pursuit/taylor_1024_1024_512_50/28-Mar-2024-13-22-55/ckpt.pt"
 checkpoint = torch.load(checkpoint_path, map_location=device)
 config = checkpoint["config"]
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
@@ -91,6 +91,9 @@ def unbucket(bucket_indices, edges):
 
 # poor man's data loader
 def get_batch(split):
+    block_size = config["block_size"]
+    batch_size = config["batch_size"]
+
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
@@ -101,16 +104,29 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
-    data = data[:,:config["num_atoms"],:]
 
     # print("data", data.shape)
-    ix = torch.randint(len(data) - config["block_size"] - config["curric_steps"], (config["batch_size"],))
-    x = torch.stack([torch.from_numpy((data[i:i+config["block_size"]]).astype(np.float32)) for i in ix])
+    ix = torch.randint(len(data) - block_size - config["curric_steps"], (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+config["curric_steps"]:i+config["curric_steps"]+block_size]).astype(np.float32)) for i in ix]) 
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
 
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
         x[:,:,:,0] /= (config["dictionary_size"])
     else :
+        #split based on biggest mags
+        mags = x[:,:,:,1]
+        _, indices = mags.sort(descending=True)
+        selected_indices = indices[:, :, :config["num_atoms"]]
+        batch_indices = torch.arange(batch_size).view(batch_size, 1, 1, 1).expand(-1, block_size, config["num_atoms"], 3)
+        seq_indices = torch.arange(block_size).view(1, block_size, 1, 1).expand(batch_size, -1, config["num_atoms"], 3)
+        selected_indices = selected_indices.unsqueeze(-1).expand(-1, -1, -1, 3)
+        x = x[batch_indices, seq_indices, selected_indices, torch.arange(3)]
         #flatten [100x3 into 300]
         x = x.reshape(x.size(0), x.size(1), -1)
         #deinterleave
@@ -121,7 +137,8 @@ def get_batch(split):
         mags = bucket(mags, mag_edges)
         phases = bucket(phases, phase_edges)
         x = encode_indices_3d(indices, mags, phases)
-    return x.to(device)
+
+    return x
 
 # model
 if init_from == 'resume':
@@ -184,7 +201,8 @@ with torch.no_grad():
             phases = unbucket(phases.long(), phase_edges)
             print("y",y.shape)
             print("indices",indices.shape)
-            interleaved = (torch.rand((y.shape[0],y.shape[1]*3), device=y.device)*(2*torch.pi))-torch.pi
+            # interleaved = (torch.rand((y.shape[0],y.shape[1]*3), device=y.device)*(2*torch.pi))-torch.pi
+            interleaved = torch.zeros((y.shape[0],y.shape[1]*3), device=y.device)
             idx = torch.arange(interleaved.shape[1]) % 3
             interleaved[:,idx == 0] = indices
             interleaved[:,idx == 1] = mags
