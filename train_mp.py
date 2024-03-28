@@ -75,7 +75,6 @@ lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
-
 num_atoms = 20
 num_features=3
 file_name = "../assets/Wiley_10.wav"
@@ -137,30 +136,60 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-config["mag_buckets"] = 50
+config["mag_buckets"] = 20
+config["phase_buckets"] = 4
+mag_edges = torch.zeros(0)
+phase_edges = torch.zeros(0)
 
-def encode_indices(indices, mags):
-    return indices * config["mag_buckets"] + mags
+# def encode_indices(indices, mags):
+#     return indices * config["mag_buckets"] + mags
 
-def decode_indices(encoded_indices):
-    indices  = encoded_indices // config["mag_buckets"]
-    mags = encoded_indices % config["mag_buckets"]
-    return indices, mags
+# def decode_indices(encoded_indices):
+#     indices  = encoded_indices // config["mag_buckets"]
+#     mags = encoded_indices % config["mag_buckets"]
+#     return indices, mags
 
-def bucket_mags(mags):
-    scaled_mags = mags * config["mag_buckets"]
-    scaled_mags = torch.clamp(scaled_mags, 0, config["mag_buckets"] - 1)
-    return scaled_mags.floor().long()
+def encode_indices_3d(indices, mags, phases):
+    composite_index = ((indices * config["mag_buckets"] + mags) * config["phase_buckets"]) + phases
+    return composite_index
+
+def decode_indices_3d(encoded_indices):
+    phases = encoded_indices % config["phase_buckets"]
+    intermediate_index = encoded_indices // config["phase_buckets"]
+    indices = intermediate_index // config["mag_buckets"]
+    mags = intermediate_index % config["mag_buckets"]
+    return indices, mags, phases
+
+def get_edges(vals, num_buckets):
+    sorted_tensor, _ = torch.sort(vals.reshape(-1))
+    total_elements = sorted_tensor.numel()
+    quantile_edges = torch.linspace(0, total_elements - 1, steps=num_buckets + 1)[1:-1].long()
+    return sorted_tensor[quantile_edges].to(vals.device)
+
+def set_edges(mags, phases):
+    global phase_edges
+    if phase_edges.numel()==0:
+        phase_edges = get_edges(phases, config["phase_buckets"]).unsqueeze(0).unsqueeze(0)
+    global mag_edges
+    if mag_edges.numel()==0:
+        mag_edges = get_edges(mags, config["mag_buckets"]).unsqueeze(0).unsqueeze(0)
+
+def bucket(vals, edges):
+    bucket_indices = (vals.unsqueeze(-1) >= edges).long().sum(dim=-1)
+    return bucket_indices
 
 def get_sparse(y):
     #sparse
     indices = y[:,:,:config["num_atoms"]].long()
-    mags = y[:,:,config["num_atoms"]:]
+    mags = y[:,:,config["num_atoms"]:config["num_atoms"]*2]
+    phases = y[:,:,config["num_atoms"]*2:]
+    set_edges(mags, phases)
     
-    mags = bucket_mags(mags)
+    mags = bucket(mags, mag_edges)
+    phases = bucket(phases, phase_edges)
     b, s, a = indices.shape
-    combined = encode_indices(indices, mags)
-    sparse = torch.zeros(b, s, config["dictionary_size"]*config["mag_buckets"], dtype=torch.float32, device=device)
+    combined = encode_indices_3d(indices, mags, phases)
+    sparse = torch.zeros(b, s, config["dictionary_size"]*config["mag_buckets"]*config["phase_buckets"], dtype=torch.float32, device=device)
     for i in range(a):
         #DIM, INDICES, VALUES
         sparse.scatter_add_(2, combined[:, :, i:i+1], torch.ones_like(combined[:, :, i:i+1], dtype=torch.float32))
@@ -179,40 +208,38 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
-    #drop phase
     data = data[:,:config["num_atoms"],:]
 
     # print("data", data.shape)
     ix = torch.randint(len(data) - block_size - config["curric_steps"], (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+block_size:i+block_size+config["curric_steps"]]).astype(np.float32)) for i in ix]) 
+    y = torch.stack([torch.from_numpy((data[i+config["curric_steps"]:i+config["curric_steps"]+block_size]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    
-    #drop phase
-    x = x[:,:,:,:2]
+
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
         x[:,:,:,0] /= (config["dictionary_size"])
     else :
-        #flatten [100x2 into 200]
+        #flatten [100x3 into 300]
         x = x.reshape(x.size(0), x.size(1), -1)
         #deinterleave
-        indices = x[:,:,::2]
-        mags = x[:,:,1::2]
-        mags = bucket_mags(mags)
-        x = encode_indices(indices, mags)
-
-    y = y[:,:,:,:2]
+        indices = x[:,:,::3]
+        mags = x[:,:,1::3]
+        phases = x[:,:,2::3]
+        set_edges(mags, phases)
+        mags = bucket(mags, mag_edges)
+        phases = bucket(phases, phase_edges)
+        x = encode_indices_3d(indices, mags, phases)
 
     if config["logit_loss"]:
-        #flatten [100x2 into 200]
+        #flatten [100x3 into 300]
         y = y.reshape(y.size(0), y.size(1), -1)
         #deinterleave
-        y = torch.cat((y[:,:,::2], y[:,:,1::2]), dim=2)
+        y = torch.cat((y[:,:,::3], y[:,:,1::3], y[:,:,2::3]), dim=2)
         y = get_sparse(y)
     else:
         #normalise into the range 0-1 (0 - dictionary_size)
@@ -245,6 +272,11 @@ if init_from == 'scratch':
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
+    print("CHECKING PARAMS")
+    for param in model.parameters():
+        assert param.requires_grad, "All model parameters should require gradients."
+
+    
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -293,9 +325,9 @@ checkpoint = None # free up memory
 
 # compile the model
 if compile:
-    print("compiling the model... (takes a ~minute)")
+    print("compiling the model... (takes a ~minute)", torch._dynamo.list_backends())
     unoptimized_model = model
-    model = torch.compile(model, backend="aot_eager") # requires PyTorch 2.0
+    model = torch.compile(model) # requires PyTorch 2.0
     print("compilation complete")
 # wrap model into DDP container
 if ddp:
@@ -312,8 +344,7 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                _, split_loss = model(X, Y[:,0].unsqueeze(1))
-                loss = split_loss.sum()
+                _, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -398,29 +429,29 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            pre_steps = 50
+            pre_steps = 50000
             torch._dynamo.config.cache_size_limit = config["curric_steps"]+1 
             steps = 1 if iter_num < pre_steps else config["curric_steps"]
-            if config["conv_input"]:
-                diff = X[:,-1,:,1]-X[:,-2,:,1]
-            else:
-                diff = X[:,-1,config["num_atoms"]:config["num_atoms"]*2]-X[:,-2,config["num_atoms"]:config["num_atoms"]*2]
-            target_loop_loss = torch.mean(torch.abs(diff), dim = (0))
             for i in range(steps):
                 #input with newly generated data (so loss is between inference and target)
-                input_block = X[:,-config["block_size"]:]
-                input_target = Y[:,i].unsqueeze(1)
-                model.train()
-                output, split_loss = model(input_block, input_target)
                 
                 if iter_num > pre_steps:
+                    input_block = X[:,-config["block_size"]:]
+                    model.train()
+                    output, loss = model(input_block, Y)
                     with torch.no_grad():
                         #Generate the next step
                         model.eval()
                         chunk_next = model.get_one_token(output)
+                        # print("chunk_next",chunk_next.shape)
+                        # print("X", X.shape)
                         X = torch.cat((X, chunk_next), dim=1)
+                else:
+                    model.train()
+                    _, loss = model(X, Y)
+
+               
                 #accumulate loss over updates
-                loss = split_loss.sum()
                 loss /= steps
                 scaler.scale(loss).backward()
 
@@ -442,11 +473,11 @@ while True:
         t0 = t1
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
-        lossf = split_loss * gradient_accumulation_steps
-        writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
-        writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
-        writer.add_scalar("loop_loss x step", lossf[2].item(), iter_num)
-        print(f"iter {iter_num}: index_loss {lossf[0].item():.4f}, mag_loss {lossf[1].item():.4f}, loop_loss {lossf[2].item():.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
+        lossf = loss * gradient_accumulation_steps
+        # writer.add_scalar("index_loss x step", lossf[0].item(), iter_num)
+        # writer.add_scalar("mag_loss x step", lossf[1].item(), iter_num)
+        # writer.add_scalar("loop_loss x step", lossf[2].item(), iter_num)
+        print(f"iter {iter_num}: index_loss {lossf.item():.4f}, time {dt*1000:.2f}ms, lr {lr:.6f}")
     iter_num += 1
     local_iter_num += 1
 

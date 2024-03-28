@@ -169,13 +169,35 @@ class MPSDropout(torch.nn.Module):
             # During evaluation, just return x
             return x
 
+class BinaryFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        super(BinaryFocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        targets = targets.type(torch.float32)
+        at = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        pt = torch.exp(-BCE_loss)
+        F_loss = at * (1 - pt) ** self.gamma * BCE_loss
+
+        if self.reduction == 'mean':
+            return F_loss.mean()
+        elif self.reduction == 'sum':
+            return F_loss.sum()
+        else:
+            return F_loss
+
+
 class GPT(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
-        config.vocab_size = 1024 * 50
+        config.vocab_size = 1024 * 80
         self.config = config
         
         print("init model", config.vocab_size, config.block_size, config.n_layer, config.n_embd, config.num_features)
@@ -193,11 +215,10 @@ class GPT(nn.Module):
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         print("self.lm_head.weight", self.lm_head.weight.shape)
-        self.bce_loss_func = nn.BCEWithLogitsLoss(pos_weight= torch.tensor(990))
-
-        #I HAVE OCMMENTED OUT WEIGHT TYING LOUIS
-
-        # self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        self.bce_loss_func = BinaryFocalLoss(alpha=0.25, gamma=2.0)
+        # self.bce_loss_func = nn.BCEWithLogitsLoss(pos_weight= torch.tensor(990))
+        # self.bce_loss_func = F.binary_cross_entropy_with_logits
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights
         self.apply(self._init_weights)
@@ -304,7 +325,7 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-        loss = torch.zeros(3, device=device, dtype=torch.float)
+        loss = None
         
         out = self.lm_head(x)
 
@@ -312,8 +333,9 @@ class GPT(nn.Module):
             #sig the coeffiecents
             if targets is not None:
                 # loss = self.logit_loss(out[:,-1,:].unsqueeze(1), targets[:,-1,:].unsqueeze(1))
-                
-                loss[0] = self.bce_loss_func(out[:,-1,:].unsqueeze(1), targets)
+                # loss[0] = self.bce_loss_func(out[:,-1,:].unsqueeze(1), targets)
+                # loss[0] = self.bce_loss_func(out[:,-1,:], targets[:,-1,:])
+                loss = self.bce_loss_func(out, targets)
         #all mse
         else:
             b,s,f = out.shape

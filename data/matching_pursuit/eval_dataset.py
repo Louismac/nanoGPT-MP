@@ -7,38 +7,60 @@ import sys
 np.set_printoptions(precision=5, suppress=True, threshold=sys.maxsize) 
 import os
 config = {}
-config["num_atoms"] = 80
+config["num_atoms"] = 20
 config["dictionary_size"] = 1024
 config["chunk_size"] = 2048
 config["name"] = "cello"
+config["curric_steps"] = 1
 device = 'cuda'
 device_type = "cuda"
 config["num_features"] = 3
-config["logit_loss"] = False
+config["logit_loss"] = True
 config["conv_input"] = True
+config["mag_buckets"] = 50
 block_size = 128
 batch_size = 64*10
 dataset = 'matching_pursuit'
 
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
 # cache_path = os.path.join("data", dataset, cache_path)
+edges = torch.zeros(0)
+def encode_indices(indices, mags):
+    return indices * config["mag_buckets"] + mags
+
+def decode_indices(encoded_indices):
+    indices  = encoded_indices // config["mag_buckets"]
+    mags = encoded_indices % config["mag_buckets"]
+    return indices, mags
+
+def get_edges(mags):
+    sorted_tensor, _ = torch.sort(mags.reshape(-1))
+    total_elements = sorted_tensor.numel()
+    quantile_edges = torch.linspace(0, total_elements - 1, steps=config["mag_buckets"] + 1)[1:-1].long()
+    return sorted_tensor[quantile_edges]
+
+def bucket_mags(mags):
+    global edges
+    if edges.numel()==0:
+        edges = get_edges(mags).unsqueeze(0).unsqueeze(0)
+    bucket_indices = (mags.unsqueeze(-1) >= edges).long().sum(dim=-1)
+    return bucket_indices
 
 def get_sparse(y):
     #sparse
-    #deinterleave
-    y = torch.cat((y[:,:,::3], y[:,:,1::3],y[:,:,2::3]), dim=2)
     indices = y[:,:,:config["num_atoms"]].long()
-    coeff = y[:,:,config["num_atoms"]:]
+    mags = y[:,:,config["num_atoms"]:]
+    
+    mags = bucket_mags(mags)
+    # print(mags.cpu().numpy())
     b, s, a = indices.shape
-    sparse = torch.zeros(b, s, config["dictionary_size"], dtype=torch.float32, device=device)
+    combined = encode_indices(indices, mags)
+    sparse = torch.zeros(b, s, config["dictionary_size"]*config["mag_buckets"], dtype=torch.float32, device=device)
     for i in range(a):
         #DIM, INDICES, VALUES
-        sparse.scatter_add_(2, indices[:, :, i:i+1], torch.ones_like(indices[:, :, i:i+1], dtype=torch.float32))
-    # print("indices", indices.cpu().numpy())
-    # print("sparse", sparse.cpu().numpy())
+        sparse.scatter_add_(2, combined[:, :, i:i+1], torch.ones_like(combined[:, :, i:i+1], dtype=torch.float32))
     sparse.clamp_(max=1)
-    #ADD IN COEFF
-    sparse = torch.cat([sparse.float(), coeff], dim=-1)
+    print("sparse", sparse.shape)
     return sparse
 
 # poor man's data loader
@@ -53,52 +75,57 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
+    #drop phase
     data = data[:,:config["num_atoms"],:]
+
     # print("data", data.shape)
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    ix = torch.randint(len(data) - block_size - config["curric_steps"], (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.float32)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.float32)) for i in ix]) 
+    y = torch.stack([torch.from_numpy((data[i+block_size:i+block_size+config["curric_steps"]]).astype(np.float32)) for i in ix]) 
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    #batch, seq, num_atoms, num_feaures
-    x = x[:,:,:,:config["num_features"]]
-    #normalise into the range 0-1 (from -pi - pi)
-    x[:,:,:,2::3] += torch.pi
-    x[:,:,:,2::3] /= (2*torch.pi)
+    
+    #drop phase
+    x = x[:,:,:,:2]
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
-        x[:,:,:,::3] /= (config["dictionary_size"])
+        x[:,:,:,0] /= (config["dictionary_size"])
     else :
-        #flatten [100x3 into 300]
-        x = x.view(x.size(0), x.size(1), -1)
+        #flatten [100x2 into 200]
+        x = x.reshape(x.size(0), x.size(1), -1)
         #deinterleave
-        x = torch.cat((x[:,:,::3], x[:,:,1::3],x[:,:,2::3]), dim=2)
+        indices = x[:,:,::2]
+        mags = x[:,:,1::2]
+        mags = bucket_mags(mags)
+        x = encode_indices(indices, mags)
 
-    y = y[:,:,:,:config["num_features"]]
-    #normalise into the range 0-1 (from -pi - pi)
-    y[:,:,:,2::3] += torch.pi
-    y[:,:,:,2::3] /= (2*torch.pi)
+    y = y[:,:,:,:2]
 
     if config["logit_loss"]:
-        #flatten [100x3 into 300]
-        y = y.view(y.size(0), y.size(1), -1)
-        #get sparse + end to end mags and phases
+        #flatten [100x2 into 200]
+        y = y.reshape(y.size(0), y.size(1), -1)
+        #deinterleave
+        y = torch.cat((y[:,:,::2], y[:,:,1::2]), dim=2)
         y = get_sparse(y)
     else:
         #normalise into the range 0-1 (0 - dictionary_size)
         y[:,:,:,0] /= (config["dictionary_size"])
-
     return x, y
 
-X,y = get_batch("train")
-# mags = X[:,:,:,1::3]
-target_loop_loss = torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1]), dim = (0))
-X,y = get_batch("train")
-loop_loss = torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1]), dim = (0))
-print(torch.mean(torch.abs(target_loop_loss - loop_loss)))
+# for i in range(10):
+#     X,y = get_batch("train")
+#     print(edges.cpu().numpy())
+#     edges = torch.zeros(0)
+
+
+# # mags = X[:,:,:,1::3]
+# target_loop_loss = torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1]), dim = (0))
+# X,y = get_batch("train")
+# loop_loss = torch.mean(torch.abs(X[:,-1,:,1]-X[:,-2,:,1]), dim = (0))
+# print(torch.mean(torch.abs(target_loop_loss - loop_loss)))
 
 # labels = X[:,:,:,::3].view(-1)
 # labels = torch.floor(labels*config["dictionary_size"])

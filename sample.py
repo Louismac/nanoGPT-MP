@@ -37,28 +37,57 @@ device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.aut
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 dataset = 'matching_pursuit'
-checkpoint_path = "data/matching_pursuit/cello_2048_1024_50/27-Mar-2024-16-24-02/ckpt.pt"
+checkpoint_path = "data/matching_pursuit/cello_2048_1024_20/28-Mar-2024-11-06-52/ckpt.pt"
 checkpoint = torch.load(checkpoint_path, map_location=device)
 config = checkpoint["config"]
 cache_path = get_run_name(config["name"], config["chunk_size"], config["dictionary_size"], config["num_atoms"])
 cache_path = os.path.join("data", dataset, cache_path)  
 print("resume from checkpoint", config)
 
-def encode_indices(indices, mags):
-    return indices * config["mag_buckets"] + mags
+mag_edges = torch.zeros(0)
+phase_edges = torch.zeros(0)
 
-def decode_indices(encoded_indices):
-    indices  = encoded_indices // config["mag_buckets"]
-    mags = encoded_indices % config["mag_buckets"]
-    return indices, mags
+def encode_indices_3d(indices, mags, phases):
+    composite_index = ((indices * config["mag_buckets"] + mags) * config["phase_buckets"]) + phases
+    return composite_index
 
-def bucket_mags(mags):
-    scaled_mags = mags * config["mag_buckets"]
-    scaled_mags = torch.clamp(scaled_mags, 0, config["mag_buckets"] - 1)
-    return scaled_mags.floor().long()
+def decode_indices_3d(encoded_indices):
+    phases = encoded_indices % config["phase_buckets"]
+    intermediate_index = encoded_indices // config["phase_buckets"]
+    indices = intermediate_index // config["mag_buckets"]
+    mags = intermediate_index % config["mag_buckets"]
+    return indices, mags, phases
 
-def unbucket_mags(mags):
-    return mags/config["mag_buckets"]
+def get_edges(vals, num_buckets):
+    sorted_tensor, _ = torch.sort(vals.reshape(-1))
+    total_elements = sorted_tensor.numel()
+    quantile_edges = torch.linspace(0, total_elements - 1, steps=num_buckets + 1)[1:-1].long()
+    return sorted_tensor[quantile_edges].to(vals.device)
+
+def set_edges(mags, phases):
+    global phase_edges
+    if phase_edges.numel()==0:
+        phase_edges = get_edges(phases, config["phase_buckets"]).unsqueeze(0).unsqueeze(0)
+    global mag_edges
+    if mag_edges.numel()==0:
+        mag_edges = get_edges(mags, config["mag_buckets"]).unsqueeze(0).unsqueeze(0)
+
+def bucket(vals, edges):
+    bucket_indices = (vals.unsqueeze(-1) >= edges).long().sum(dim=-1)
+    return bucket_indices
+
+def unbucket(bucket_indices, edges):
+    edges = edges.view(-1).to(device)
+    bucket_indices = bucket_indices.to(device)
+    midpoints = torch.zeros(len(edges) + 1).to(device)
+    lower_bound = edges[0] - (edges[1] - edges[0]) 
+    midpoints[0] = (lower_bound + edges[0]) / 2
+    for i in range(1, len(edges)):
+        midpoints[i] = (edges[i-1] + edges[i]) / 2
+    midpoints[-1] = edges[-1] + (edges[-1] - edges[-2]) / 2
+    approx_vals = midpoints[bucket_indices]
+
+    return approx_vals
 
 # poor man's data loader
 def get_batch(split):
@@ -72,32 +101,27 @@ def get_batch(split):
     num_features = (saved_atoms*3)
     # print("num_frames", len(data)//num_features)
     data = data.reshape(len(data)//num_features, saved_atoms, 3)
-    #drop phase
     data = data[:,:config["num_atoms"],:]
 
     # print("data", data.shape)
     ix = torch.randint(len(data) - config["block_size"] - config["curric_steps"], (config["batch_size"],))
     x = torch.stack([torch.from_numpy((data[i:i+config["block_size"]]).astype(np.float32)) for i in ix])
-    if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x = x.pin_memory().to(device, non_blocking=True)
-    else:
-        x = x.to(device)
-    
-    #drop phase
-    x = x[:,:,:,:2]
+
     if config["conv_input"]:
         #normalise into the range 0-1 (0 - dictionary_size)
         x[:,:,:,0] /= (config["dictionary_size"])
     else :
-        #flatten [100x2 into 200]
+        #flatten [100x3 into 300]
         x = x.reshape(x.size(0), x.size(1), -1)
         #deinterleave
-        indices = x[:,:,::2]
-        mags = x[:,:,1::2]
-        mags = bucket_mags(mags)
-        x = encode_indices(indices, mags)
-    return x
+        indices = x[:,:,::3]
+        mags = x[:,:,1::3]
+        phases = x[:,:,2::3]
+        set_edges(mags, phases)
+        mags = bucket(mags, mag_edges)
+        phases = bucket(phases, phase_edges)
+        x = encode_indices_3d(indices, mags, phases)
+    return x.to(device)
 
 # model
 if init_from == 'resume':
@@ -146,28 +170,25 @@ else:
 
 
 x = get_batch("train")
-print("x[0]", x[0].shape)
+print("x[0]")
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             pick = np.random.randint(len(x))
             input = x[pick].unsqueeze(0)
-            # input =  torch.rand(input.shape, dtype = input.dtype, device = input.device)
             y = model.generate(input, max_new_tokens, temperature=temperature, top_k=top_k)
             y = y.squeeze(0)
-            indices, mags = decode_indices(y)
-            mags = unbucket_mags(mags)
-            phases = torch.zeros_like(mags)
+            indices, mags, phases = decode_indices_3d(y)
+            mags = unbucket(mags.long(), mag_edges)
+            phases = unbucket(phases.long(), phase_edges)
             print("y",y.shape)
             print("indices",indices.shape)
-            print("mags",mags.shape)
-            # normalised indexes in a 2D tensor
-            interleaved = torch.zeros((y.shape[0],y.shape[1]*3), device=y.device)
+            interleaved = (torch.rand((y.shape[0],y.shape[1]*3), device=y.device)*(2*torch.pi))-torch.pi
             idx = torch.arange(interleaved.shape[1]) % 3
             interleaved[:,idx == 0] = indices
             interleaved[:,idx == 1] = mags
-            y = interleaved
+            interleaved[:,idx == 2] = phases
             #we get indexes and mags and phases, libltfat wants sparse complex coefficients 
-            np.savetxt("output" + str(k) + ".csv", y.cpu().numpy(), delimiter=',',fmt='%.6f')
+            np.savetxt("output" + str(k) + ".csv", interleaved.cpu().numpy(), delimiter=',',fmt='%.6f')
             
